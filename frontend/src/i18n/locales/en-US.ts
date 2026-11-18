@@ -6110,6 +6110,7 @@ const enUS = {
     importFolder: "Import Folder",
     importZip: "Import ZIP",
     taskManageParse: "Parse Task Management",
+    documentList: "Documents",
     batchActions: "Batch Actions",
     batchDelete: "Batch Delete",
     batchReparse: "Batch Reparse",
