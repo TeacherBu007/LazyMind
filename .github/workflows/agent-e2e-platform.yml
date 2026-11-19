@@ -2,12 +2,19 @@ name: Agent E2E Platform Checks
 
 on:
   workflow_dispatch:
+    inputs:
+      component:
+        description: Select platform tests or fresh source runtime bootstrap
+        type: choice
+        options: [tests, runtime, all]
+        default: tests
 
 permissions:
   contents: read
 
 jobs:
   transport-and-isolation:
+    if: ${{ inputs.component != 'runtime' }}
     strategy:
       fail-fast: false
       matrix:
@@ -28,3 +35,56 @@ jobs:
         run: python -m pip install Pillow==12.0.0 PyYAML==6.0.3
       - name: Verify platform locks, process cleanup, transport and credential boundaries
         run: python -m unittest discover -s scripts/tests -p "test_agent_e2e*.py" -v
+  fresh-runtime:
+    if: ${{ inputs.component != 'tests' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.14'
+          cache-dependency-path: |
+            local/local-runtime-manager/go.sum
+            local/lazymind-cli/go.sum
+            backend/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.2'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10.0.0'
+          run_install: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.10'
+      - name: Install bootstrap dependencies
+        run: python -m pip install Pillow==12.0.0 PyYAML==6.0.3
+      - name: Start source-built LazyMind and verify real authenticated MCP catalog
+        run: python scripts/agent_e2e_hosted.py start
+      - name: Diagnose startup failure
+        if: failure()
+        run: python scripts/agent_e2e_hosted.py diagnose
+      - name: Stop disposable runtime
+        if: always()
+        run: python scripts/agent_e2e_hosted.py stop
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hosted-runtime-${{ matrix.os }}
+          path: ${{ runner.temp }}/lazymind-hosted/results/hosted-runtime.json
+          if-no-files-found: warn
+          retention-days: 7
