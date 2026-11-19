@@ -124,6 +124,20 @@ def install_font(p):
     rendered = ImageFont.truetype(str(font), size=48)
     if bytes(rendered.getmask('收')) == bytes(rendered.getmask('到')):
         raise RuntimeError('Chinese caption font glyph check failed')
+    if platform.IS_WINDOWS:
+        import ctypes
+        import winreg
+        installed = Path(os.environ['LOCALAPPDATA']) / 'Microsoft/Windows/Fonts/NotoSansSC.ttf'
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(font, installed)
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows NT\CurrentVersion\Fonts') as key:
+            winreg.SetValueEx(key, 'Noto Sans SC (TrueType)', 0, winreg.REG_SZ, str(installed))
+        if not ctypes.windll.gdi32.AddFontResourceExW(str(installed), 0, 0):
+            raise RuntimeError('Could not register the CI Chinese font for Chromium')
+    else:
+        installed = Path.home() / 'Library/Fonts/NotoSansSC.ttf'
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(font, installed)
     print('Verified pinned Noto Sans SC and Chinese caption glyphs.', flush=True)
 
 

@@ -1264,6 +1264,7 @@ def run_case(args, agent, case, commands):
                        "当服务端ppt_export_html不可用时，使用宿主终端执行该程序，不能标记完成或交付HTML冒充PPTX。"
                        "命令为node <上述程序> --deck-dir <本测试目录的deck子目录> --output presentation.pptx --force --no-embed-fonts；"
                        "HTML页面放deck/pages目录，文件命名为page_001.html、page_002.html、page_003.html。设置LAZYMIND_PPT_EXTERNAL_OFFLINE=1，禁止自动安装依赖、联网或远程资源。"
+                       + ('托管 CI 已安装支持中文的 Noto Sans SC，HTML 优先使用该字体。' if os.environ.get('LAZYMIND_CI_RUNTIME_PROVENANCE') else '') +
                        f"已安装浏览器目录若存在则设置PLAYWRIGHT_BROWSERS_PATH={browsers}。"
                        "导出程序只读项目现有工具代码，输出和临时文件必须留在本测试目录。"
                        "按步骤契约发布实际PPTX及其要求的其他产物后再完成步骤。")
