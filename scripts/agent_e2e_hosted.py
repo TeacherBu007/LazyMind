@@ -26,8 +26,10 @@ def run(command, *, cwd=ROOT, env=None, timeout=1800):
 
 
 def paths(root):
+    logs = Path(os.environ['LOCALAPPDATA']) / 'LazyMind/Logs' if platform.IS_WINDOWS else Path.home() / 'Library/Logs/LazyMind'
     return SimpleNamespace(root=root, runtime=root / 'runtime', build=root / 'build',
                            home=root / 'connector', output=root / 'results',
+                           logs=logs,
                            manager=root / 'bin' / platform.executable_name('local-runtime-manager'))
 
 
@@ -66,7 +68,7 @@ def start(p):
     def startup_errors():
         seen = {}
         while not finished.wait(20):
-            for path in p.runtime.rglob('*.log'):
+            for path in p.logs.glob('*.log'):
                 if path.name not in ('chat.log', 'core.log', 'auth-service.log', 'process-compose.log'):
                     continue
                 try:
@@ -76,7 +78,7 @@ def start(p):
                     if tail != seen.get(str(path)) and any(marker in tail for marker in
                             ('Traceback', 'ModuleNotFoundError', 'ImportError', 'ERROR', 'failed:')):
                         seen[str(path)] = tail
-                        print('Startup diagnostic: ' + str(path.relative_to(p.runtime)), flush=True)
+                        print('Startup diagnostic: ' + path.name, flush=True)
                         for line in tail.splitlines()[-20:]:
                             print(e2e.safe_diagnostic(line), flush=True)
                 except OSError:
@@ -125,10 +127,10 @@ def stop(p):
 
 def diagnose(p):
     """Expose bounded, redacted startup errors, never the private runtime tree."""
-    for path in sorted(p.runtime.rglob('*.log')):
+    for path in sorted(set(p.logs.glob('*.log')) | set(p.runtime.rglob('*.log'))):
         if path.is_file():
             lines = path.read_text(encoding='utf-8', errors='replace').splitlines()[-15:]
-            print(str(path.relative_to(p.runtime)), flush=True)
+            print(path.name, flush=True)
             for line in lines:
                 print(e2e.safe_diagnostic(line), flush=True)
 
@@ -237,7 +239,7 @@ def install_agents(p):
 
 
 def main():
-    if os.environ.get('GITHUB_ACTIONS') != 'true':
+    if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
         raise SystemExit('This bootstrap runs only on a disposable GitHub Actions VM.')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('start', 'stop', 'diagnose', 'install-agents'))
