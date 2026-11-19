@@ -1014,7 +1014,7 @@ def report(args):
         for previous in value.get("previous_results", []):
             history.append({"agent": value["agent"], "case": value["case"], "scope": scope,
                             "directory": value["directory"], "prior_to_resume": True, **previous})
-    lines = ["# LazyMind 本地 Agent 集成测试", "", "连接探测与真实业务运行分开统计；保留全部失败和重跑记录。", "",
+    lines = ["# LazyMind Agent 集成测试", "", "连接探测与真实业务运行分开统计；保留全部失败和重跑记录。", "",
              "| Agent | 用例 | 范围 | 结果 | 原因 |", "|---|---|---|---|---|"]
     suite = ET.Element("testsuite", name="lazymind-agent-e2e")
     failures = skipped = 0
@@ -1039,7 +1039,19 @@ def report(args):
     if findings.is_file():
         lines += ["", "## 本轮已确认的问题", ""]
         lines += ["- " + finding["description"] for finding in json.loads(findings.read_text(encoding='utf-8'))]
-    lines += ["", "本轮使用现有本地 LazyMind 服务；运行中服务的构建版本尚未独立核实。", "",
+    runtime_record = output / 'hosted-runtime.json'
+    if runtime_record.is_file():
+        runtime = json.loads(runtime_record.read_text(encoding='utf-8'))
+        lines += ['', f"运行环境：GitHub 托管的 {runtime['platform']} 临时虚拟机；LazyMind 从源码构建：`{runtime['source_sha']}`。",
+                  f"GitHub 工作流 SHA：`{os.environ.get('GITHUB_WORKFLOW_SHA', 'unknown')}`。"]
+        installed = output / 'installed-agents.json'
+        if installed.is_file():
+            versions = json.loads(installed.read_text(encoding='utf-8'))['versions']
+            lines += ['Agent 版本：' + '；'.join(f'{name} `{value}`' for name, value in versions.items()) + '。']
+        lines += ['各业务场景的 LazyMind workflow revision 和产物校验见 JUnit system-out 记录。']
+    else:
+        lines += ['', '本轮使用现有本地 LazyMind 服务；运行中服务的构建版本尚未独立核实。']
+    lines += ["",
               "CLI/MCP 测试不覆盖桌面面板继续、停止或恢复。视觉质量、字幕识别和科学正确性不由文件结构检查证明。"]
     (output / "report.md").write_text("\n".join(lines) + "\n", encoding='utf-8')
     ET.ElementTree(suite).write(output / "junit.xml", encoding="utf-8", xml_declaration=True)
