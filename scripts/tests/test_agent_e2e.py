@@ -471,6 +471,26 @@ class RunnerBoundaryTests(unittest.TestCase):
         for secret in ("secret-value", "private-value", "hidden"):
             self.assertNotIn(secret, result)
 
+    def test_failure_summary_retains_final_error_without_reasoning_or_custom_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            env = os.environ.copy()
+            env['OPENAI_API_KEY'] = 'custom-provider-credential-12345'
+            env['LAZYMIND_CI_PROXY_SESSION'] = 'random-proxy-session-98765'
+            command = [sys.executable, '-c', '''import json,os
+print(json.dumps({'type':'item.completed','item':{'type':'reasoning','text':'private-reasoning'}}))
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Export failed '+os.environ['OPENAI_API_KEY']+' '+os.environ['LAZYMIND_CI_PROXY_SESSION']}}))
+''']
+            turn = runner.invoke_process(command, env, '', directory, 5)
+            result = {'agent':'codex','case':'ppt','reason':'business_step_failed:generate_ppt',
+                      'turns':[turn], 'private_profile':'must-not-be-published'}
+            with runner.contextlib.redirect_stdout(io.StringIO()):
+                runner.failure_diagnostics(result, directory)
+            public = (directory / 'failure-diagnostics.json').read_text()
+            self.assertIn('Export failed', public)
+            for private in ('private-reasoning', env['OPENAI_API_KEY'], env['LAZYMIND_CI_PROXY_SESSION'], 'must-not-be-published'):
+                self.assertNotIn(private, public)
+
     def test_trace_reader_tolerates_interrupted_last_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)

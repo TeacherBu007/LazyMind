@@ -1162,6 +1162,15 @@ def invoke_process(command, env, prompt, directory, timeout):
     buffers = {"stdout": b"", "stderr": b""}
     dropping = {"stdout": False, "stderr": False}
 
+    def diagnostic(value):
+        text = str(value)
+        # Custom providers and the per-turn proxy need not use sk-/JWT keys.
+        # Remove their exact credentials before retaining a bounded summary.
+        for key, secret in env.items():
+            if len(secret) >= 8 and re.search(r"(?i)(key|token|secret|password|proxy_session)$", key):
+                text = text.replace(secret, "[REDACTED]")
+        return safe_diagnostic(text)
+
     def consume(raw):
         nonlocal session, host_error, last_message
         line = raw.decode("utf-8", errors="replace")
@@ -1172,12 +1181,12 @@ def invoke_process(command, env, prompt, directory, timeout):
             session = event.get("thread_id") or event.get("session_id") or event.get("sessionId") or session
             item = event.get("item", {})
             if isinstance(item, dict) and item.get("type") == "agent_message":
-                last_message = safe_diagnostic(item.get("text", ""))
+                last_message = diagnostic(item.get("text", ""))
             elif kind == "text" and isinstance(event.get("text"), str):
-                last_message = safe_diagnostic(event["text"])
+                last_message = diagnostic(event["text"])
             if event.get("is_error") or kind in ("turn.failed", "error"):
                 host_error = True
-                diagnostics.append(safe_diagnostic(event.get("errors") or event.get("error") or event.get("message", "Agent reported an error")))
+                diagnostics.append(diagnostic(event.get("errors") or event.get("error") or event.get("message", "Agent reported an error")))
         except (ValueError, AttributeError):
             for marker in ("Unknown argument", "unexpected argument", "No API key", "Unauthorized",
                            "MODULE_NOT_FOUND", "Cannot find package", "not logged in", "Missing credentials"):
@@ -1234,6 +1243,24 @@ def invoke_process(command, env, prompt, directory, timeout):
             "host_session_id": session, "event_types": event_types,
             "host_error": host_error, "diagnostics": diagnostics, "last_message": last_message,
             "seconds": round(time.monotonic() - started, 2)}
+
+
+def failure_diagnostics(result, directory):
+    """Publish only bounded summaries; never raw events, tool inputs or profiles."""
+    fields = ("exit_code", "timed_out", "host_error", "seconds", "event_types", "diagnostics", "last_message")
+    details = {"agent": result["agent"], "case": result["case"], "reason": result.get("reason"),
+               "turns": [{k: turn.get(k) for k in fields} for turn in result.get("turns", [])],
+               "connection_attempts": [{"status": attempt["status"],
+                    "turn": {k: attempt["turn"].get(k) for k in fields}}
+                    for attempt in result.get("connection_attempts", [])],
+               "mcp_events": trace_events(directory)[-40:]}
+    state_path = directory / 'state.json'
+    if state_path.is_file():
+        state = json.loads(state_path.read_text(encoding='utf-8'))
+        control = state.get('control', {})
+        details['workflow'] = {k: control.get(k) for k in ('continuation', 'automatic_retry_steps')}
+    write_json(directory / 'failure-diagnostics.json', details)
+    print('Failure diagnostic: ' + json.dumps(details, ensure_ascii=False), flush=True)
 
 
 def run_case(args, agent, case, commands):
@@ -1340,6 +1367,8 @@ def run_case(args, agent, case, commands):
         if attempts_file.exists():
             result["connection_attempts"] = json.loads(attempts_file.read_text(encoding='utf-8'))
     write_json(directory / "result.json", result)
+    if result['status'] != 'passed':
+        failure_diagnostics(result, directory)
     return result
 
 

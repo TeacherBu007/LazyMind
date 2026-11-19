@@ -149,6 +149,7 @@ jobs:
             ${{ runner.temp }}/lazymind-hosted/results/junit.xml
             ${{ runner.temp }}/lazymind-hosted/results/hosted-runtime.json
             ${{ runner.temp }}/lazymind-hosted/results/installed-agents.json
+            ${{ runner.temp }}/lazymind-hosted/results/*/failure-diagnostics.json
             ${{ runner.temp }}/lazymind-hosted/results/*/artifacts/*.pptx
             ${{ runner.temp }}/lazymind-hosted/results/*/artifacts/*.png
             ${{ runner.temp }}/lazymind-hosted/results/*/artifacts/*.md
