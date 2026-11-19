@@ -471,6 +471,20 @@ class RunnerBoundaryTests(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["reason"], "business_step_failed:write_outline")
 
+    def test_completed_business_artifact_does_not_hide_a_host_timeout(self):
+        class Client:
+            def call(self, name, **kwargs):
+                return {'control': {'continuation': 'completed'}, 'projection': {'completed': True}}
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / 'mcp.jsonl').write_text(json.dumps({'tool':'workflow.start', 'session_id':'run', 'revision_id':'revision'})+'\n')
+            result = {'revision_id':'revision', 'case':'ppt', 'turns':[{'exit_code':-1,'timed_out':True,'seconds':30}]}
+            with patch.object(runner, 'collect_artifacts', return_value=([], [{'slides':3}], {'native_pptx'})):
+                runner.finish_run(SimpleNamespace(timeout=30, max_turns=3), result, directory, Client(), {})
+            self.assertTrue(result['business_artifacts_verified'])
+            self.assertEqual(result['status'], 'failed')
+            self.assertEqual(result['reason'], 'host_execution_failed_after_business_completion')
+
     def test_pending_review_is_not_a_completed_business_result(self):
         class Client:
             def call(self, name, **kwargs):
@@ -503,6 +517,7 @@ class RunnerBoundaryTests(unittest.TestCase):
             command = [sys.executable, '-c', '''import json,os
 print(json.dumps({'type':'item.completed','item':{'type':'reasoning','text':'private-reasoning'}}))
 print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Export failed '+os.environ['OPENAI_API_KEY']+' '+os.environ['LAZYMIND_CI_PROXY_SESSION']}}))
+print(json.dumps({'type':'assistant','message':{'content':[{'type':'thinking','thinking':'private-reasoning'},{'type':'text','text':'Export failed '+os.environ['OPENAI_API_KEY']+' '+os.environ['LAZYMIND_CI_PROXY_SESSION']}]}}))
 ''']
             turn = runner.invoke_process(command, env, '', directory, 5)
             result = {'agent':'codex','case':'ppt','reason':'business_step_failed:generate_ppt',

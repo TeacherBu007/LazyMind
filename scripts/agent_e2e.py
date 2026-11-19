@@ -942,7 +942,10 @@ def finish_run(args, result, directory, client, commands):
             result.update(artifacts=inventory, artifact_checks=checks)
             expected = {"write_outline_document", "write_document_document"} if result["case"] == "paper" else {"native_pptx"} if result["case"] == "ppt" else {"meme_static_output"}
             if checks and expected <= slots:
-                result.update(status="passed", reason=None)
+                result['business_artifacts_verified'] = True
+                abnormal_exit = any(t.get('exit_code') or t.get('timed_out') or t.get('host_error') for t in result['turns'])
+                result.update(status='failed' if abnormal_exit else 'passed',
+                              reason='host_execution_failed_after_business_completion' if abnormal_exit else None)
             else:
                 result.update(status="failed", reason="required_published_artifact_not_verified")
             return
@@ -1033,8 +1036,10 @@ def report(args):
         elif value["status"] != "passed":
             skipped += 1
             ET.SubElement(test, "skipped", message=value.get("reason") or value["status"])
-        ET.SubElement(test, "system-out").text = json.dumps({k: value.get(k) for k in
-                            ("directory", "session_id", "revision_id", "artifact_checks")}, ensure_ascii=False)
+        evidence = {k: value.get(k) for k in ('directory', 'session_id', 'revision_id', 'artifact_checks', 'business_artifacts_verified')}
+        evidence['host_execution'] = [{k: turn.get(k) for k in ('exit_code', 'timed_out', 'host_error', 'seconds')}
+                                      for turn in value.get('turns', [])]
+        ET.SubElement(test, "system-out").text = json.dumps(evidence, ensure_ascii=False)
     suite.set("tests", str(len(latest)))
     suite.set("failures", str(failures))
     suite.set("skipped", str(skipped))
@@ -1126,7 +1131,16 @@ def ppt_export_callback(directory, env):
         deck = root / 'deck'
         if deck.is_symlink() or deck.resolve() != deck or Path(body['deck_dir']).resolve() != deck:
             raise ValueError('export_must_use_this_fixture_deck')
-        files = list(deck.rglob('*'))
+        files, pending = [], [deck]
+        while pending:
+            for path in pending.pop().iterdir():
+                if path.is_symlink() or not path.resolve().is_relative_to(deck):
+                    raise ValueError('export_fixture_cannot_link_external_files')
+                files.append(path)
+                if len(files) > 40:
+                    raise ValueError('export_fixture_too_many_files')
+                if path.is_dir():
+                    pending.append(path)
         allowed = {'.html', '.txt', '.md', '.json', '.svg', '.png', '.jpg', '.jpeg', '.pptx'}
         if (len(files) > 40 or any(p.is_symlink() or (p.is_file() and p.suffix.lower() not in allowed) for p in files)
                 or sum(p.stat().st_size for p in files if p.is_file()) > 32 * 1024 * 1024
@@ -1249,6 +1263,12 @@ def invoke_process(command, env, prompt, directory, timeout):
             item = event.get("item", {})
             if isinstance(item, dict) and item.get("type") == "agent_message":
                 last_message = diagnostic(item.get("text", ""))
+            elif kind == 'assistant' and isinstance(event.get('message'), dict):
+                for part in event['message'].get('content', []):
+                    if isinstance(part, dict) and part.get('type') == 'text':
+                        last_message = diagnostic(part.get('text', ''))
+            elif kind == 'result' and isinstance(event.get('result'), str):
+                last_message = diagnostic(event['result'])
             elif kind == "text" and isinstance(event.get("text"), str):
                 last_message = diagnostic(event["text"])
             if event.get("is_error") or kind in ("turn.failed", "error"):
