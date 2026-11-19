@@ -8,6 +8,11 @@ on:
         type: choice
         options: [tests, runtime, agents, all]
         default: tests
+      platform:
+        description: Operating system for runtime and Agent installation checks
+        type: choice
+        options: [all, macos-15-intel, windows-2025]
+        default: all
 
 permissions:
   contents: read
@@ -40,7 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15-intel, windows-2025]
+        os: ${{ fromJSON(inputs.platform == 'all' && '["macos-15-intel","windows-2025"]' || format('["{0}"]', inputs.platform)) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:

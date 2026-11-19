@@ -1,5 +1,7 @@
 # 本地外部 Agent 端到端测试
 
+需要完全在 GitHub 的临时 macOS / Windows 虚拟机上安装和运行时，请阅读 [托管 CI 配置说明](agent_e2e_hosted.md)。本页保留本机 / self-hosted 调试路径。
+
 使用真实 Codex CLI、WorkBuddy 内置执行引擎、DeepSeek Harness headless，通过仓库 Go CLI 的真实 MCP 服务连接 LazyMind。业务步骤由 Agent 执行并发布产物；图片辅助程序仅在 Agent 调用时请求配置的真实生图服务。工作流状态与审核通过正常用户/MCP 接口操作。
 
 当前范围是 CLI/MCP 执行链路，不覆盖桌面插件的面板唤醒、停止、恢复。脚本复用已运行的本地 LazyMind 服务，不自动替换服务或证明服务构建与当前 Git SHA 相同。

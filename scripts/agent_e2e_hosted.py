@@ -51,11 +51,14 @@ def environment(p, create=False):
                LAZYMIND_BOOTSTRAP_ADMIN_USERNAME='ci-admin', LAZYMIND_LOCAL_UP_TIMEOUT='600',
                LAZYMIND_RUNTIME_ROOT=str(p.runtime), LAZYMIND_LOCAL_BUILD_ROOT=str(p.build),
                CGO_ENABLED='0' if platform.IS_WINDOWS else '1', PYTHONUTF8='1', PYTHONIOENCODING='utf-8')
+    if (p.root / 'fonts/NotoSansSC.ttf').exists():
+        env['LAZYMIND_MEME_FONT_PATH'] = str(p.root / 'fonts/NotoSansSC.ttf')
     return env
 
 
 def start(p):
     p.manager.parent.mkdir(parents=True, exist_ok=True)
+    install_font(p)
     env = environment(p, create=True)
     run(['go', 'build', '-o', str(p.manager), '.'], cwd=ROOT / 'local/local-runtime-manager', env=env)
     run([str(p.manager), 'up', *runtime_args(p)], env=env, timeout=2700)
@@ -84,6 +87,7 @@ def start(p):
     print('Fresh LazyMind runtime and all three MCP workflow revisions verified.', flush=True)
     with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as stream:
         for key, value in {'HOSTED_ROOT': p.root, 'LAZYMIND_HOME': p.home,
+                           'LAZYMIND_CI_RUNTIME_PROVENANCE': p.output / 'hosted-runtime.json',
                            'LAZYMIND_SERVER_URL': 'http://localhost:8090'}.items():
             stream.write(f'{key}={value}\n')
 
@@ -101,6 +105,26 @@ def diagnose(p):
             print(str(path.relative_to(p.runtime)), flush=True)
             for line in lines:
                 print(e2e.safe_diagnostic(line), flush=True)
+
+
+def install_font(p):
+    from PIL import ImageFont
+    destination = p.root / 'fonts'
+    destination.mkdir(exist_ok=True)
+    commit = '5bd87dfc525c8a0d1d8529d3684716e00c3fc59a'
+    base = f'https://raw.githubusercontent.com/google/fonts/{commit}/ofl/notosanssc/'
+    font = destination / 'NotoSansSC.ttf'
+    with urllib.request.urlopen(base + 'NotoSansSC%5Bwght%5D.ttf', timeout=120) as response:
+        data = response.read(20 * 1024 * 1024)
+    if hashlib.sha256(data).hexdigest() != 'a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da':
+        raise RuntimeError('Noto Sans SC font SHA-256 mismatch')
+    font.write_bytes(data)
+    with urllib.request.urlopen(base + 'OFL.txt', timeout=60) as response:
+        (destination / 'OFL.txt').write_bytes(response.read(32768))
+    rendered = ImageFont.truetype(str(font), size=48)
+    if bytes(rendered.getmask('收')) == bytes(rendered.getmask('到')):
+        raise RuntimeError('Chinese caption font glyph check failed')
+    print('Verified pinned Noto Sans SC and Chinese caption glyphs.', flush=True)
 
 
 def install_agents(p):
@@ -132,9 +156,9 @@ def install_agents(p):
         raise RuntimeError('Official WorkBuddy installer SHA-256 mismatch')
     buddy = p.root / 'workbuddy'
     if platform.IS_WINDOWS:
-        # WorkBuddy's Windows distribution uses the standard Inno Setup installer.
-        run([str(archive), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-',
-             '/MERGETASKS=!runcodebuddy,!desktopicon,!quicklaunchicon', '/DIR=' + str(buddy)], timeout=600)
+        # Verified in the vendor executable: Nullsoft.NSIS.exehead / NSIS 3.11.
+        # NSIS requires /D= last; the hosted runner's temp root has no spaces.
+        run([str(archive), '/S', '/D=' + str(buddy)], timeout=600)
     else:
         with zipfile.ZipFile(archive) as source:
             # Only the genuine bundled CLI is needed for headless CI.

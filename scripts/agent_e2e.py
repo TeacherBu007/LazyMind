@@ -440,10 +440,14 @@ def provenance(cli):
             path = ROOT / line[2:]
             if path.is_file():
                 local.append({"path": line[2:], "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    runtime = 'Existing local LazyMind service; source SHA does not prove the running service build'
+    if os.environ.get('LAZYMIND_CI_RUNTIME_PROVENANCE'):
+        runtime = json.loads(Path(os.environ['LAZYMIND_CI_RUNTIME_PROVENANCE']).read_text(encoding='utf-8'))
     return {"source_sha": git("rev-parse", "HEAD"), "source_status": git("status", "--short"),
             "protected_local_files": local, "cli_sha256": hashlib.sha256(cli.read_bytes()).hexdigest(),
             "execution_surface": "CLI/MCP; desktop panel control is not covered",
-            "runtime_provenance": "Existing local LazyMind service; source SHA does not prove the running service build"}
+            'platform': sys.platform, 'workflow_sha': os.environ.get('GITHUB_WORKFLOW_SHA'),
+            'workflow_ref': os.environ.get('GITHUB_WORKFLOW_REF'), 'runtime_provenance': runtime}
 
 
 def installed_app_versions():
@@ -608,7 +612,7 @@ def agent_command(name, directory, args, command, session=None):
         routes = {'version': 1, **providers.public(managed)}
         for route in routes.values():
             if isinstance(route, dict):
-                route['api_key_env'] = 'CODEBUDDY_API_KEY'
+                route['api_key_env'] = 'LAZYMIND_CI_PROXY_SESSION'
         private_config(profile / 'providers.json', json.dumps(routes, indent=2))
         env.update(LAZYMIND_CI_PROXY_CONFIG=str(args.providers_config), LAZYMIND_CI_MANAGED_AGENT=name)
     if name == "codex":
@@ -657,7 +661,7 @@ def agent_command(name, directory, args, command, session=None):
             route_config = {'version': 1, **providers.public(supplied)}
             for section in route_config.values():
                 if isinstance(section, dict):
-                    section['api_key_env'] = 'CODEBUDDY_API_KEY'
+                    section['api_key_env'] = 'LAZYMIND_CI_PROXY_SESSION'
             private_config(profile / 'providers.json', json.dumps(route_config, indent=2))
             env.update(WORKBUDDY_CONFIG_DIR=str(profile), CODEBUDDY_CONFIG_DIR=str(profile),
                        LAZYMIND_CI_PROXY_CONFIG=str(args.providers_config), CODEBUDDY_CREDENTIALS_IN_MEMORY='1')
@@ -1091,7 +1095,8 @@ def invoke(command, env, prompt, directory, timeout):
         with providers.ModelProxy(supplied) as proxy:
             child_env = {k: v for k, v in env.items() if not k.startswith('LAZYMIND_CI_') and not k.endswith(('_API_KEY', '_AUTH_TOKEN'))}
             child_env.update(CODEBUDDY_BASE_URL=proxy.base_url, CODEBUDDY_API_KEY=proxy.token,
-                             LAZYMIND_CI_LLM_BASE_URL=proxy.base_url, LAZYMIND_CI_IMAGE_BASE_URL=proxy.base_url)
+                             LAZYMIND_CI_LLM_BASE_URL=proxy.base_url, LAZYMIND_CI_IMAGE_BASE_URL=proxy.base_url,
+                             LAZYMIND_CI_PROXY_SESSION=proxy.token)
             if env.get('LAZYMIND_CI_MANAGED_AGENT') == 'codex':
                 child_env['OPENAI_API_KEY'] = proxy.token
                 # Append a CLI override after the placeholder, before stdin '-'.
