@@ -57,7 +57,7 @@ jobs:
           cache-dependency-path: |
             local/local-runtime-manager/go.sum
             local/lazymind-cli/go.sum
-            backend/go.sum
+            backend/core/go.sum
             scripts/agent_e2e_hosted.py
       - uses: actions/setup-node@v4
         with:

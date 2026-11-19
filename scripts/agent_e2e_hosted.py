@@ -64,6 +64,17 @@ def start(p):
     install_font(p)
     env = environment(p, create=True)
     run(['go', 'build', '-o', str(p.manager), '.'], cwd=ROOT / 'local/local-runtime-manager', env=env)
+    if platform.IS_WINDOWS:
+        # Chat waits five minutes for Core. A cold Go build on a two-CPU VM
+        # can take longer, so populate the normal compiler cache before services
+        # start. The runtime manager still builds and runs its own Core binary.
+        print('Preparing Windows Core before the service readiness window.', flush=True)
+        run([sys.executable, str(ROOT / 'frontend/scripts/generate_upstream_model_catalog.py'),
+             '--backend-out', str(ROOT / 'backend/core/config/upstream_model_catalog.json'),
+             '--frontend-out', str(ROOT / 'frontend/src/modules/modelProvider/upstreamModelCatalog.json')],
+            env=env, timeout=240)
+        run(['go', 'build', '-buildvcs=false', '-o', str(p.manager.parent / 'core-build-check.exe'), '.'],
+            cwd=ROOT / 'backend/core', env=env)
     finished = threading.Event()
     def startup_errors():
         seen = {}
