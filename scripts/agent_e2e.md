@@ -62,6 +62,45 @@ uv run scripts/agent_e2e.py run --agent workbuddy --case meme --probe --timeout 
 
 工作流只手动触发，密钥通过进程环境传递；临时配置不含真实 Key。只上传 `report.md` 和 `junit.xml`，最后清理本次临时 profile 和结果。需要本地保留并查看图片等产物时，使用下方本地命令。执行机器由仓库绑定的 runner 决定：在你的仓库触发并选中你的 runner，就在你的电脑运行；其他人需在自己的仓库配置自己的 runner。
 
+### macOS runner 的安装与日常管理
+
+runner 安装在仓库外，例如 `~/.local/share/lazymind-ci/runner`，工作目录使用其下的 `_work`。GitHub 检出代码和清理工作区时不会操作日常开发目录。macOS 用户登录后由 LaunchAgent 启动 runner；LazyMind 服务需保持启动并登录。
+
+在目标仓库 **Settings → Actions → Runners → New self-hosted runner** 选择 macOS 和对应架构，按页面提供的下载地址和 SHA-256 校验包，再注册 runner，添加 `lazymind-ci` 标签。注册令牌、`.credentials` 和 `.credentials_rsaparams` 保留在仓库外，限制为本机用户访问。参考 [GitHub 注册说明](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners)。
+
+需要使用命令行管理仓库时，先安装 GitHub CLI 并授权：
+
+```sh
+gh auth login --hostname github.com --git-protocol https --web --scopes repo,workflow
+```
+
+网页登录完成后，设备授权页要求的是这条命令在终端生成的设备激活码，用于把本机 CLI 关联到 GitHub 账号。模型 Key 不参与 GitHub 登录。
+
+runner 注册后，在安装目录中管理服务：
+
+```sh
+cd "$HOME/.local/share/lazymind-ci/runner"
+./svc.sh install
+./svc.sh start
+./svc.sh status
+# 暂停接收任务时执行：./svc.sh stop
+```
+
+已经安装服务时直接使用 `start` / `status`。这是当前 macOS 用户的 LaunchAgent，需保持用户登录。服务管理方式见 [GitHub 官方说明](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/configure-the-application)。
+
+也可通过 GitHub CLI 触发；将下面的仓库账号替换为自己的账号：
+
+```sh
+LAZYMIND_CI_REPO="你的账号/LazyMind"
+# 三个 Agent 的只读连接验收
+gh workflow run agent-e2e.yml --repo "$LAZYMIND_CI_REPO" --ref main \
+  -f agent=all -f case=ppt -F probe_only=true -F approve_test_reviews=false
+# 三个 Agent × 三类场景，共九项业务测试
+gh workflow run agent-e2e.yml --repo "$LAZYMIND_CI_REPO" --ref main \
+  -f agent=all -f case=all -F probe_only=false -F approve_test_reviews=true
+gh run list --repo "$LAZYMIND_CI_REPO" --workflow agent-e2e.yml
+```
+
 ## 前置条件
 
 - 安装 `uv`，由脚本内声明安装 Python 3.11+、Pillow、PyYAML。
