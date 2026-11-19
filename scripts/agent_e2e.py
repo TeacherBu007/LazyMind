@@ -632,6 +632,11 @@ def agent_command(name, directory, args, command, session=None):
                     dotted = ".".join(part if re.fullmatch(r"[\w-]+", part) else json.dumps(part) for part in nested)
                     overrides.extend(["--config", dotted + "=" + json.dumps(item)])
         flatten(settings)
+        if managed:
+            # The fixed CI fixture invokes the trusted image provider helper.
+            # Give that job's workspace sandbox its required network access;
+            # keep filesystem write limits and the approval reviewer enabled.
+            overrides += ['--config', 'sandbox_workspace_write.network_access=true']
         cmd = command + ["exec"]
         if session:
             cmd += ["resume", session]

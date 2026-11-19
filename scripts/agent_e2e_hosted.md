@@ -31,6 +31,7 @@
 - PPT 导出依赖使用工作流自带锁文件安装，并安装、实际启动 Chromium。
 - 中文字幕使用来自 Google Fonts 官方仓库固定提交的 Noto Sans SC，核对 SHA-256 并验证汉字字形，附带字体许可；不依赖 Windows 是否预装中文字体。
 - 模型 Key 由测试控制器持有；Agent 使用本次启动的本机代理和短期随机令牌。三个 Agent 都使用本次注入的 LazyMind 连接、工作流 ID 和 revision，并在业务前做只读探测；旧连接最多恢复一次。
+- Codex 的 CI 临时配置保留 workspace-write 写入限制和审批机制，并显式启用工作流所需的网络访问，使可信生图辅助程序可以连接本次代理及图片服务。
 - 账号、数据库、凭据和模型配置放在 VM 的临时目录。上传产物仅包括选定报告、公开构建来源记录和实际 PNG / PPTX / Markdown 交付物；不会上传整个运行目录。
 - 报告区分测试通过、业务状态、文件检查及未独立验证的视觉或学术质量，并记录 LazyMind SHA、工作流 SHA、Agent 版本及 LazyMind 工作流 revision。
 
