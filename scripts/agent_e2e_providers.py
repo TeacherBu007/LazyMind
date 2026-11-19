@@ -46,7 +46,7 @@ def load(path=None, *, required=False, require_image=False):
         try:
             if path.stat().st_size > 1024 * 1024:
                 raise ValueError
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding='utf-8'))
             if not isinstance(data, dict) or data.get('version') != 1:
                 raise ValueError
         except (OSError, ValueError):

@@ -19,10 +19,7 @@ import os
 import plistlib
 import queue
 import re
-import selectors
-import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -35,6 +32,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
+import agent_e2e_platform as host_platform
 import agent_e2e_providers as providers
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,16 +66,11 @@ def write_json(path, value):
 @contextlib.contextmanager
 def run_lock(directory):
     """Prevent two supervisors from sending turns into the same host session."""
-    import fcntl
-    with (Path(directory) / "supervisor.lock").open("a") as stream:
-        try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise RuntimeError("This test run already has an active supervisor") from error
-        try:
+    try:
+        with host_platform.file_lock(Path(directory) / 'supervisor.lock', blocking=False):
             yield
-        finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
+    except BlockingIOError as error:
+        raise RuntimeError("This test run already has an active supervisor") from error
 
 
 def unpack(result):
@@ -121,7 +114,7 @@ def connection_snapshot(args):
     credential_path = home / "credentials.json"
     if credential_path.stat().st_size > 1024 * 1024:
         raise ConnectionGuardError("invalid_credential_file")
-    credential = json.loads(credential_path.read_text())
+    credential = json.loads(credential_path.read_text(encoding='utf-8'))
     server = local_origin(args.server)
     if local_origin(credential.get("server_url", "")) != server:
         raise ConnectionGuardError("credential_server_mismatch")
@@ -138,7 +131,7 @@ def connection_snapshot(args):
                 credential.get("tenant_id", ""), subject]
     if not identity[2] and not subject:
         raise ConnectionGuardError("credential_identity_unavailable")
-    host_id = (home / "connector-host-id").read_text().strip()
+    host_id = (home / "connector-host-id").read_text(encoding='utf-8').strip()
     if not host_id:
         raise ConnectionGuardError("connector_host_id_missing")
     cli = Path(args.cli).resolve()
@@ -167,7 +160,7 @@ def private_config(path, text):
         shutil.copy2(path, backup)
         backup.chmod(0o600)
     temporary = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex[:8])
-    temporary.write_text(text)
+    temporary.write_text(text, encoding='utf-8')
     temporary.chmod(0o600)
     temporary.replace(path)
 
@@ -200,7 +193,7 @@ def clean_env(home, server, agent=""):
         allowed.update(("CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN", "CODEBUDDY_BASE_URL", "CODEBUDDY_INTERNET_ENVIRONMENT"))
     config = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
     if agent == "codex" and config.is_file():
-        model = tomllib.loads(config.read_text())
+        model = tomllib.loads(config.read_text(encoding='utf-8'))
         key = model.get("model_providers", {}).get(model.get("model_provider"), {}).get("env_key")
         if isinstance(key, str):
             allowed.add(key)
@@ -209,7 +202,7 @@ def clean_env(home, server, agent=""):
                LAZYMIND_WORKFLOW_HOST_CONTROL="0", LAZYMIND_AGENT_PROVIDER=agent)
     host_id = Path(home) / "connector-host-id"
     if host_id.is_file():
-        env["LAZYMIND_AGENT_HOST_ID"] = host_id.read_text().strip()
+        env["LAZYMIND_AGENT_HOST_ID"] = host_id.read_text(encoding='utf-8').strip()
     return env
 
 
@@ -218,9 +211,9 @@ class MCP:
     def __init__(self, cli, env, timeout=60):
         self.timeout, self.counter = timeout, 0
         self.messages = queue.Queue()
-        self.process = subprocess.Popen([str(cli), "mcp", "proxy"], env=env,
+        self.process = subprocess.Popen([*host_platform.connector_command(cli), "mcp", "proxy"], env=env,
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, text=True)
+                                        stderr=subprocess.DEVNULL, text=True, encoding='utf-8')
         def read():
             for line in self.process.stdout:
                 try:
@@ -273,13 +266,13 @@ class MCP:
 
 def observe(args):
     """Transparent MCP relay: only allowlisted protocol evidence goes to disk."""
-    context = json.loads(Path(args.connection_context).read_text()) if args.connection_context else None
+    context = json.loads(Path(args.connection_context).read_text(encoding='utf-8')) if args.connection_context else None
     guard_args = argparse.Namespace(home=Path(context["home"]), server=context["server"], cli=context["cli"],
                                     providers_config=context.get('providers_config')) if context else None
     if context:
         assert_connection(guard_args, context)
     proxy_env = {k: v for k, v in os.environ.items() if not k.endswith(('_API_KEY', '_AUTH_TOKEN'))}
-    process = subprocess.Popen([args.cli, "mcp", "proxy"], env=proxy_env, stdin=subprocess.PIPE,
+    process = subprocess.Popen([*host_platform.connector_command(args.cli), "mcp", "proxy"], env=proxy_env, stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     calls = {}
     lock = threading.Lock()
@@ -299,7 +292,7 @@ def observe(args):
                     if context:
                         try:
                             assert_connection(guard_args, context)
-                            if json.loads(Path(args.connection_context).read_text())["generation"] != context["generation"]:
+                            if json.loads(Path(args.connection_context).read_text(encoding='utf-8'))["generation"] != context["generation"]:
                                 raise ConnectionGuardError("connection_generation_changed")
                             validate_guarded_call(context, name, arguments)
                         except (ConnectionGuardError, OSError, ValueError) as error:
@@ -367,15 +360,35 @@ def version(command):
 
 
 def discover():
+    supplied = os.environ.get('LAZYMIND_CI_AGENT_COMMANDS')
+    if supplied:
+        try:
+            commands = json.loads(Path(supplied).read_text(encoding='utf-8'))
+            if not isinstance(commands, dict) or set(commands) - set(AGENTS):
+                raise ValueError
+            if any(not isinstance(row, list) or not row or any(not isinstance(v, str) or not v for v in row)
+                   for row in commands.values()):
+                raise ValueError
+        except (OSError, ValueError):
+            raise RuntimeError('Invalid CI Agent command manifest') from None
+    else:
+        commands = {}
     buddy = Path(os.environ.get("WORKBUDDY_CONFIG_DIR", Path.home() / ".workbuddy"))
-    app = Path(os.environ.get("WORKBUDDY_APP", "/Applications/WorkBuddy.app"))
-    script = app / "Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
-    lite = app / "Contents/Resources/app.asar.unpacked/cli/dist/codebuddy-lite-wb.mjs"
-    nodes = sorted((buddy / "binaries/node/versions").glob("*/bin/node"), reverse=True)
-    workbuddy = [str(nodes[0]), str(script)] if nodes and script.is_file() and lite.is_file() else []
-    return {"codex": [shutil.which("codex")] if shutil.which("codex") else [],
-            "workbuddy": workbuddy,
-            "deepseek-harness": [shutil.which("dsh")] if shutil.which("dsh") else []}
+    default_app = Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData/Local')) / 'Programs/WorkBuddy' if host_platform.IS_WINDOWS else Path('/Applications/WorkBuddy.app')
+    app = Path(os.environ.get('WORKBUDDY_APP', default_app))
+    cli_roots = [app / 'Contents/Resources/app.asar.unpacked/cli', app / 'resources/app.asar.unpacked/cli']
+    nodes = sorted((buddy / 'binaries/node/versions').glob('*/bin/node'), reverse=True)
+    nodes += sorted((buddy / 'binaries/node/versions').glob('*/node.exe'), reverse=True)
+    node = str(nodes[0]) if nodes else shutil.which('node')
+    workbuddy = []
+    for cli in cli_roots:
+        if node and (cli / 'bin/codebuddy').is_file() and (cli / 'dist/codebuddy-lite-wb.mjs').is_file():
+            workbuddy = [node, str(cli / 'bin/codebuddy')]
+            break
+    defaults = {'codex': [shutil.which('codex')] if shutil.which('codex') else [],
+                'workbuddy': workbuddy,
+                'deepseek-harness': [shutil.which('dsh')] if shutil.which('dsh') else []}
+    return {name: commands.get(name, default) for name, default in defaults.items()}
 
 
 def setup_dsh(args):
@@ -409,7 +422,7 @@ def setup_dsh(args):
         patch = profile / "cordis.patch.yml"
         if patch.exists():
             shutil.copy2(patch, patch.with_name("cordis.patch.before-e2e.yml"))
-        patch.write_text(json.dumps(rows, ensure_ascii=False, indent=2))
+        patch.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding='utf-8')
         patch.chmod(0o600)
         print("Test profile uses the existing web model selection and normal stored authentication")
     print("Prepared DSH test profile: " + args.dsh_profile)
@@ -465,7 +478,7 @@ def doctor(args):
 
 
 def build_cli(args):
-    target = Path(args.output).resolve() / "bin/lazymind"
+    target = Path(args.output).resolve() / 'bin' / host_platform.executable_name('lazymind')
     target.parent.mkdir(parents=True, exist_ok=True)
     source_hash = connector_source_hash()
     temporary = target.with_name("lazymind-build-" + uuid.uuid4().hex[:8])
@@ -498,13 +511,11 @@ def ensure_current_cli(args):
         if not Path(args.cli).is_file():
             raise ConnectionGuardError("explicit_connector_cli_missing")
         return
-    import fcntl
     target = Path(args.cli)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with (target.parent / "build.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with host_platform.file_lock(target.parent / 'build.lock'):
         try:
-            record = json.loads((target.parent / "provenance.json").read_text())
+            record = json.loads((target.parent / "provenance.json").read_text(encoding='utf-8'))
             current = (record.get("connector_source_hash") == connector_source_hash()
                        and record.get("cli_sha256") == hashlib.sha256(target.read_bytes()).hexdigest())
         except (OSError, ValueError):
@@ -517,7 +528,7 @@ def codex_config(directory, entry):
     """Keep the user's authenticated model route, exclude unrelated MCP servers."""
     home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
     original = home / "config.toml"
-    config = tomllib.loads(original.read_text()) if original.exists() else {}
+    config = tomllib.loads(original.read_text(encoding='utf-8')) if original.exists() else {}
     rows = []
     for key in ("model", "model_provider", "model_reasoning_effort"):
         if key in config:
@@ -579,12 +590,12 @@ def agent_command(name, directory, args, command, session=None):
                      "LAZYMIND_WORKFLOW_HOST_CONTROL": "0", "LAZYMIND_AGENT_PROVIDER": name}}
     host_id = Path(args.home) / "connector-host-id"
     if host_id.is_file():
-        entry["env"]["LAZYMIND_AGENT_HOST_ID"] = host_id.read_text().strip()
+        entry["env"]["LAZYMIND_AGENT_HOST_ID"] = host_id.read_text(encoding='utf-8').strip()
     env = clean_env(args.home, args.server, name)
     if name == "codex":
         config = codex_config(directory, entry)
         # Ignore unrelated user MCP entries, but retain the existing auth store.
-        settings = tomllib.loads(config.read_text())
+        settings = tomllib.loads(config.read_text(encoding='utf-8'))
         overrides = []
         def flatten(value, path=()):
             for key, item in value.items():
@@ -632,10 +643,12 @@ def agent_command(name, directory, args, command, session=None):
             env.pop('CODEBUDDY_INTERNET_ENVIRONMENT', None)
             cmd += ['--model', supplied['llm']['model'], '--setting-sources', 'user',
                     '--allowedTools', 'mcp__lazymind__*', 'ToolSearch', 'DeferExecuteTool', 'Read', 'Write', 'Edit', 'Bash']
+            if host_platform.IS_WINDOWS:
+                cmd.append('PowerShell')
         if session:
             cmd += ["--resume", session]
         return cmd, env
-    context = json.loads((directory / "connection.json").read_text())
+    context = json.loads((directory / "connection.json").read_text(encoding='utf-8'))
     patch = dsh_connection_patch(command, env, args)
     patch.append({"insert": [{"id": "mcp-lazymind-ci-" + context["generation"], "name": "@deepseek-ai/dsh-mcp-client",
                          "config": {"serverName": "lazymind", "transport": "stdio", **entry,
@@ -653,7 +666,7 @@ def trace_events(directory):
     path = directory / "mcp.jsonl"
     values = []
     if path.exists():
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding='utf-8').splitlines():
             with contextlib.suppress(ValueError):
                 values.append(json.loads(line))
     return values
@@ -709,7 +722,7 @@ class LocalAPI:
         self.home, self.server = args.home, args.server.rstrip("/")
 
     def request(self, path, payload=None):
-        credential = json.loads((self.home / "credentials.json").read_text())
+        credential = json.loads((self.home / "credentials.json").read_text(encoding='utf-8'))
         if credential.get("server_url", "").rstrip("/") != self.server:
             raise RuntimeError("Test server differs from the existing credential scope")
         request = urllib.request.Request(self.server + "/api/core" + path,
@@ -730,7 +743,7 @@ class LocalAPI:
         origin = urllib.parse.urlsplit(self.server)
         if (parsed.scheme, parsed.netloc) != (origin.scheme, origin.netloc):
             raise RuntimeError("Artifact must be served by the tested LazyMind instance")
-        credential = json.loads((self.home / "credentials.json").read_text())
+        credential = json.loads((self.home / "credentials.json").read_text(encoding='utf-8'))
         request = urllib.request.Request(parsed.geturl(), headers={"Authorization": "Bearer " + credential["access_token"]})
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *args, **kwargs):
@@ -835,7 +848,7 @@ def collect_artifacts(client, args, session, directory, case):
             text = content if isinstance(content, str) else (content or {}).get("text", "")
             if text and not text.startswith(("http:", "https:", "/api/")):
                 path = destination / (slot + ".md")
-                path.write_text(text)
+                path.write_text(text, encoding='utf-8')
                 if slot == "write_document_document":
                     checks.append(validate_file(path, case))
                 slots.add(slot)
@@ -950,7 +963,7 @@ def report(args):
     latest = {}
     attempts = []
     for path in output.glob("*/result.json"):
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding='utf-8'))
         events = trace_events(path.parent)
         started = value.get("started_at") or next((e["time"] for e in events if e.get("time")), path.stat().st_mtime)
         attempts.append((started, value))
@@ -986,10 +999,10 @@ def report(args):
     findings = output / "findings.json"
     if findings.is_file():
         lines += ["", "## 本轮已确认的问题", ""]
-        lines += ["- " + finding["description"] for finding in json.loads(findings.read_text())]
+        lines += ["- " + finding["description"] for finding in json.loads(findings.read_text(encoding='utf-8'))]
     lines += ["", "本轮使用现有本地 LazyMind 服务；运行中服务的构建版本尚未独立核实。", "",
               "CLI/MCP 测试不覆盖桌面面板继续、停止或恢复。视觉质量、字幕识别和科学正确性不由文件结构检查证明。"]
-    (output / "report.md").write_text("\n".join(lines) + "\n")
+    (output / "report.md").write_text("\n".join(lines) + "\n", encoding='utf-8')
     ET.ElementTree(suite).write(output / "junit.xml", encoding="utf-8", xml_declaration=True)
     write_json(output / "history.json", history)
     write_json(output / "summary.json", list(latest.values()))
@@ -1007,7 +1020,7 @@ def resume_case(args):
 
 
 def resume_locked(args, path):
-    result = json.loads(path.read_text())
+    result = json.loads(path.read_text(encoding='utf-8'))
     owner = result.get("supervisor_pid")
     if owner and owner != os.getpid():
         try:
@@ -1060,29 +1073,26 @@ def invoke(command, env, prompt, directory, timeout):
 def invoke_process(command, env, prompt, directory, timeout):
     """Bound process lifetime, discard reasoning, retain only event type/session IDs."""
     started = time.monotonic()
-    process = subprocess.Popen(command, cwd=directory, env=env, stdin=subprocess.PIPE,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               start_new_session=True)
+    tree = host_platform.ProcessTree(command, cwd=directory, env=env, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = tree.process
     process.stdin.write(prompt.encode())
     process.stdin.close()
     session, event_types, diagnostics, host_error, last_message = None, {}, [], False, ""
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    output = queue.Queue()
+    def read_stream(stream, name):
+        try:
+            while chunk := os.read(stream.fileno(), 65536):
+                output.put((name, chunk))
+        finally:
+            output.put((name, None))
+    readers = [threading.Thread(target=read_stream, args=(stream, name), daemon=True)
+               for stream, name in ((process.stdout, 'stdout'), (process.stderr, 'stderr'))]
+    for reader in readers:
+        reader.start()
     timed_out = False
     buffers = {"stdout": b"", "stderr": b""}
     dropping = {"stdout": False, "stderr": False}
-
-    def stop_process(sig):
-        try:
-            os.killpg(process.pid, sig)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            # Some macOS execution environments disallow group signals even
-            # for a direct child. Use the child's normal process handle.
-            if process.poll() is None:
-                process.send_signal(sig)
 
     def consume(raw):
         nonlocal session, host_error, last_message
@@ -1106,40 +1116,50 @@ def invoke_process(command, env, prompt, directory, timeout):
                 if marker.lower() in line.lower() and marker not in diagnostics:
                     diagnostics.append(marker)
     try:
-        while selector.get_map():
+        active = {'stdout', 'stderr'}
+        while active:
             if time.monotonic() - started > timeout:
                 timed_out = True
-                stop_process(signal.SIGTERM)
+                tree.stop()
                 break
-            for key, _ in selector.select(timeout=.5):
-                chunk = os.read(key.fd, 65536)
-                stream = key.data
-                if not chunk:
-                    if buffers[stream] and not dropping[stream]:
-                        consume(buffers[stream])
-                    selector.unregister(key.fileobj)
-                    continue
-                buffers[stream] += chunk
-                while b"\n" in buffers[stream]:
-                    line, buffers[stream] = buffers[stream].split(b"\n", 1)
-                    if not dropping[stream]:
-                        consume(line)
-                    dropping[stream] = False
-                if len(buffers[stream]) > 16 * 1024 * 1024:
-                    buffers[stream] = b""
-                    dropping[stream] = True
-                    event_types["oversized_event_omitted"] = event_types.get("oversized_event_omitted", 0) + 1
+            try:
+                stream, chunk = output.get(timeout=.5)
+            except queue.Empty:
+                if process.poll() is not None:
+                    # The root CLI has finished. Orphan MCP helpers can retain
+                    # pipe handles; clean them up instead of waiting for timeout.
+                    for name in active:
+                        if buffers[name] and not dropping[name]:
+                            consume(buffers[name])
+                    break
+                continue
+            if chunk is None:
+                if buffers[stream] and not dropping[stream]:
+                    consume(buffers[stream])
+                active.discard(stream)
+                continue
+            buffers[stream] += chunk
+            while b"\n" in buffers[stream]:
+                line, buffers[stream] = buffers[stream].split(b"\n", 1)
+                if not dropping[stream]:
+                    consume(line)
+                dropping[stream] = False
+            if len(buffers[stream]) > 16 * 1024 * 1024:
+                buffers[stream] = b""
+                dropping[stream] = True
+                event_types["oversized_event_omitted"] = event_types.get("oversized_event_omitted", 0) + 1
     finally:
-        selector.close()
         if process.poll() is None:
-            stop_process(signal.SIGTERM)
+            tree.stop()
         try:
             process.wait(timeout=8)
         except subprocess.TimeoutExpired:
-            stop_process(signal.SIGKILL)
+            tree.stop(force=True)
             process.wait()
         # Own only this invocation's group; release leftover MCP lease renewers.
-        stop_process(signal.SIGTERM)
+        tree.close()
+        for reader in readers:
+            reader.join(timeout=2)
         process.stdout.close()
         process.stderr.close()
     return {"exit_code": process.returncode, "timed_out": timed_out,
@@ -1151,7 +1171,7 @@ def invoke_process(command, env, prompt, directory, timeout):
 def run_case(args, agent, case, commands):
     directory = Path(args.output).resolve() / f"{agent}-{case}-{uuid.uuid4().hex[:8]}"
     directory.mkdir(parents=True, mode=0o700)
-    (directory / "materials.md").write_text(MATERIALS)
+    (directory / "materials.md").write_text(MATERIALS, encoding='utf-8')
     result = {"agent": agent, "case": case, "status": "running", "directory": str(directory),
               "agent_version": version(commands[agent]) if commands[agent] else "missing",
               "provenance": provenance(Path(args.cli)), "turns": []}
@@ -1204,7 +1224,7 @@ def run_case(args, agent, case, commands):
             result['provider_routes'] = providers.public(supplied)
             if case == 'meme' and 'image' in supplied:
                 route_path = args.private_profile_root / directory.name / 'providers.json'
-                helper = shlex.join([sys.executable, str(SCRIPT), 'provider-image', '--providers-config', str(route_path),
+                helper = host_platform.shell_command([sys.executable, str(SCRIPT), 'provider-image', '--providers-config', str(route_path),
                                      '--image-output', str(directory / 'generated-base.png'), '--image-prompt', '<本步骤的无文字英文生图提示词>'])
                 prompt += ('\n本次 CI 使用已验证的独立生图服务。generate_image 步骤通过宿主终端执行以下可信辅助程序发起真实生图：\n'
                            + helper + '\n不要使用 WorkBuddy 默认 ImageGen 或替代模型，不要读取配置内容或环境变量。'
@@ -1249,12 +1269,16 @@ def run_case(args, agent, case, commands):
             client.close()
         attempts_file = directory / "connection-attempts.json"
         if attempts_file.exists():
-            result["connection_attempts"] = json.loads(attempts_file.read_text())
+            result["connection_attempts"] = json.loads(attempts_file.read_text(encoding='utf-8'))
     write_json(directory / "result.json", result)
     return result
 
 
 def main():
+    # MCP is UTF-8 on every OS, including Windows consoles with a legacy code page.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("doctor", "run", "observe", "setup-dsh", "report", "resume", "build-cli", 'config-check', 'provider-image'))
     parser.add_argument("--cli")
@@ -1295,14 +1319,14 @@ def main():
         except providers.ProviderConfigurationError as error:
             print(str(error), file=sys.stderr)
             return 2
-    built = Path(args.output).resolve() / "bin/lazymind"
+    built = Path(args.output).resolve() / 'bin' / host_platform.executable_name('lazymind')
     args.auto_cli = args.cli is None
     args.cli = str(Path(args.cli).resolve()) if args.cli else str(built)
     if args.action == "observe":
         return observe(args)
     if not args.server:
         path = args.home / "credentials.json"
-        args.server = json.loads(path.read_text()).get("server_url", "") if path.is_file() else "http://localhost:8090"
+        args.server = json.loads(path.read_text(encoding='utf-8')).get("server_url", "") if path.is_file() else "http://localhost:8090"
     # Local tests must never accidentally transmit credentials to an arbitrary server.
     try:
         args.server = local_origin(args.server)

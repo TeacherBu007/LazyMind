@@ -5,9 +5,11 @@ import importlib.util
 import io
 import json
 import os
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -233,7 +235,8 @@ class ConnectionFallbackTests(unittest.TestCase):
             path.write_text("old config")
             runner.private_config(path, "new config")
             self.assertEqual(next(root.glob("mcp.json.before-*")).read_text(), "old config")
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name == 'posix':
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             with patch.dict(os.environ, {"LAZYMIND_CONNECTOR_CONFIG": "/old/account.json", "LAZYMIND_MCP_URL": "http://localhost:1"}):
                 for agent in runner.AGENTS:
                     env = runner.clean_env(root, "http://localhost:8090", agent)
@@ -244,6 +247,7 @@ class ConnectionFallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             args = connection_fixture(root)
+            args.cli = str(root / 'fixture-connector.py')
             upstream_log = root / "upstream.jsonl"
             Path(args.cli).write_text('#!' + runner.sys.executable + '\nimport sys,json\n'
                 f'log={str(upstream_log)!r}\n'
@@ -267,6 +271,7 @@ class ConnectionFallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             args = connection_fixture(root)
+            args.cli = str(root / 'fixture-connector.py')
             upstream_log = root / "upstream.jsonl"
             Path(args.cli).write_text('#!' + runner.sys.executable + '\nimport sys,json\n'
                 f'log={str(upstream_log)!r}\n'
@@ -280,38 +285,42 @@ class ConnectionFallbackTests(unittest.TestCase):
             process = subprocess.Popen([runner.sys.executable, str(runner.SCRIPT), "observe", "--cli", args.cli,
                         "--trace", str(root / "mcp.jsonl"), "--connection-context", str(root / "connection.json")],
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            messages = queue.Queue()
+            def read_messages():
+                for line in process.stdout:
+                    messages.put(line)
+            reader = threading.Thread(target=read_messages, daemon=True)
+            reader.start()
             try:
                 request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
                     "name": "workflow.get", "arguments": {"workflow_id": "image-workflow", "revision_id": "revision"}}}
                 process.stdin.write(json.dumps(request) + "\n")
                 process.stdin.flush()
-                with runner.selectors.DefaultSelector() as selector:
-                    selector.register(process.stdout, runner.selectors.EVENT_READ)
-                    self.assertTrue(selector.select(timeout=10),
-                                    f"Relay did not forward its valid read response: {runner.trace_events(root)}")
-                self.assertEqual(json.loads(process.stdout.readline())["id"], 1)
+                self.assertEqual(json.loads(messages.get(timeout=10))["id"], 1)
                 request["id"] = 2
                 request["params"]["name"] = "workflow.start"
                 process.stdin.write(json.dumps(request) + "\n")
                 process.stdin.flush()
-                with runner.selectors.DefaultSelector() as selector:
-                    selector.register(process.stdout, runner.selectors.EVENT_READ)
-                    self.assertTrue(selector.select(timeout=10))
-                self.assertEqual(json.loads(process.stdout.readline())["id"], 2)
+                self.assertEqual(json.loads(messages.get(timeout=10))["id"], 2)
                 credential = json.loads((args.home / "credentials.json").read_text())
                 credential["username"] = "new-account"
                 runner.write_json(args.home / "credentials.json", credential)
                 request["id"] = 3
                 request["params"]["name"] = "workflow.artifact.publish"
-                output, _ = process.communicate(json.dumps(request) + "\n", timeout=5)
-                self.assertTrue(json.loads(output.splitlines()[0])["result"]["isError"])
+                process.stdin.write(json.dumps(request) + '\n')
+                process.stdin.close()
+                self.assertTrue(json.loads(messages.get(timeout=10))["result"]["isError"])
+                process.wait(timeout=5)
                 upstream = [json.loads(line) for line in upstream_log.read_text().splitlines()]
                 self.assertEqual([r["params"]["name"] for r in upstream], ["workflow.get", "workflow.start"])
                 self.assertIn("connection_context_changed", (root / "mcp.jsonl").read_text())
             finally:
                 if process.poll() is None:
                     process.kill()
-                process.communicate()
+                process.wait(timeout=5)
+                reader.join(timeout=2)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    stream.close()
 
 
 class RunnerBoundaryTests(unittest.TestCase):
