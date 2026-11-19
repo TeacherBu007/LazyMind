@@ -1225,10 +1225,9 @@ def invoke_process(command, env, prompt, directory, timeout):
     tree = host_platform.ProcessTree(command, cwd=directory, env=env, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     process = tree.process
-    process.stdin.write(prompt.encode())
-    process.stdin.close()
     session, event_types, diagnostics, host_error, last_message = None, {}, [], False, ""
     output = queue.Queue()
+    input_errors = []
     def read_stream(stream, name):
         try:
             while chunk := os.read(stream.fileno(), 65536):
@@ -1239,6 +1238,19 @@ def invoke_process(command, env, prompt, directory, timeout):
                for stream, name in ((process.stdout, 'stdout'), (process.stderr, 'stderr'))]
     for reader in readers:
         reader.start()
+    def feed_prompt():
+        # A CLI may fill stdout/stderr before it reads stdin. Never block the
+        # supervisor on a full input pipe before output draining/timeouts start.
+        try:
+            process.stdin.write(prompt.encode('utf-8'))
+            process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            input_errors.append('host_stdin_closed_before_prompt_finished')
+        finally:
+            with contextlib.suppress(BrokenPipeError, OSError):
+                process.stdin.close()
+    writer = threading.Thread(target=feed_prompt, daemon=True)
+    writer.start()
     timed_out = False
     buffers = {"stdout": b"", "stderr": b""}
     dropping = {"stdout": False, "stderr": False}
@@ -1322,10 +1334,14 @@ def invoke_process(command, env, prompt, directory, timeout):
             process.wait()
         # Own only this invocation's group; release leftover MCP lease renewers.
         tree.close()
+        writer.join(timeout=2)
         for reader in readers:
             reader.join(timeout=2)
         process.stdout.close()
         process.stderr.close()
+    if input_errors and not timed_out:
+        diagnostics.extend(input_errors)
+        host_error = True
     return {"exit_code": process.returncode, "timed_out": timed_out,
             "host_session_id": session, "event_types": event_types,
             "host_error": host_error, "diagnostics": diagnostics, "last_message": last_message,

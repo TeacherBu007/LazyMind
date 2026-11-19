@@ -424,6 +424,31 @@ class RunnerBoundaryTests(unittest.TestCase):
             self.assertTrue(result["timed_out"])
             self.assertLess(time.monotonic() - started, 3)
 
+    def test_large_prompt_and_startup_output_are_drained_in_both_directions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = '测试材料\n' * 150000
+            child = '''import json,sys,threading,os
+timer=threading.Timer(5, lambda: os._exit(7));timer.start()
+print(json.dumps({'type':'startup','text':'x'*1048576}),flush=True)
+sys.stderr.write('x'*1048576+'\\n');sys.stderr.flush()
+data=sys.stdin.buffer.read()
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':str(len(data))}}),flush=True)
+timer.cancel()
+'''
+            result = runner.invoke_process([sys.executable, '-c', child], os.environ.copy(), prompt, Path(tmp), 4)
+            self.assertEqual(result['exit_code'], 0)
+            self.assertFalse(result['timed_out'])
+            self.assertFalse(result['host_error'])
+            self.assertEqual(result['last_message'], str(len(prompt.encode('utf-8'))))
+
+    def test_timeout_remains_active_while_a_host_does_not_read_a_large_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            started = time.monotonic()
+            result = runner.invoke_process([sys.executable, '-c', 'import time;time.sleep(20)'],
+                         os.environ.copy(), 'x'*1048576, Path(tmp), .5)
+            self.assertTrue(result['timed_out'])
+            self.assertLess(time.monotonic() - started, 3)
+
     def test_report_preserves_failure_history_and_selects_latest_started_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp)
