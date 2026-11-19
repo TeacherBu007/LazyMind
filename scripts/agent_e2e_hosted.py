@@ -9,6 +9,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import threading
 import urllib.request
 import zipfile
 from types import SimpleNamespace
@@ -61,7 +62,32 @@ def start(p):
     install_font(p)
     env = environment(p, create=True)
     run(['go', 'build', '-o', str(p.manager), '.'], cwd=ROOT / 'local/local-runtime-manager', env=env)
-    run([str(p.manager), 'up', *runtime_args(p)], env=env, timeout=2700)
+    finished = threading.Event()
+    def startup_errors():
+        seen = {}
+        while not finished.wait(20):
+            for path in p.runtime.rglob('*.log'):
+                if path.name not in ('chat.log', 'core.log', 'auth-service.log', 'process-compose.log'):
+                    continue
+                try:
+                    with path.open('rb') as stream:
+                        stream.seek(max(0, path.stat().st_size - 16384))
+                        tail = stream.read().decode('utf-8', errors='replace')
+                    if tail != seen.get(str(path)) and any(marker in tail for marker in
+                            ('Traceback', 'ModuleNotFoundError', 'ImportError', 'ERROR', 'failed:')):
+                        seen[str(path)] = tail
+                        print('Startup diagnostic: ' + str(path.relative_to(p.runtime)), flush=True)
+                        for line in tail.splitlines()[-20:]:
+                            print(e2e.safe_diagnostic(line), flush=True)
+                except OSError:
+                    continue
+    monitor = threading.Thread(target=startup_errors, daemon=True)
+    monitor.start()
+    try:
+        run([str(p.manager), 'up', *runtime_args(p)], env=env, timeout=2700)
+    finally:
+        finished.set()
+        monitor.join(timeout=2)
     args = SimpleNamespace(output=str(p.output))
     e2e.build_cli(args)
     cli = p.output / 'bin' / platform.executable_name('lazymind')
@@ -126,13 +152,17 @@ def install_font(p):
         raise RuntimeError('Chinese caption font glyph check failed')
     if platform.IS_WINDOWS:
         import ctypes
+        from ctypes import wintypes
         import winreg
         installed = Path(os.environ['LOCALAPPDATA']) / 'Microsoft/Windows/Fonts/NotoSansSC.ttf'
         installed.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(font, installed)
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows NT\CurrentVersion\Fonts') as key:
             winreg.SetValueEx(key, 'Noto Sans SC (TrueType)', 0, winreg.REG_SZ, str(installed))
-        if not ctypes.windll.gdi32.AddFontResourceExW(str(installed), 0, 0):
+        register = ctypes.windll.gdi32.AddFontResourceExW
+        register.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+        register.restype = ctypes.c_int
+        if not register(str(installed), 0, None):
             raise RuntimeError('Could not register the CI Chinese font for Chromium')
     else:
         installed = Path.home() / 'Library/Fonts/NotoSansSC.ttf'

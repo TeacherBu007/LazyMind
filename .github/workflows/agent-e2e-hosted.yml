@@ -56,6 +56,7 @@ jobs:
             local/local-runtime-manager/go.sum
             local/lazymind-cli/go.sum
             backend/go.sum
+            scripts/agent_e2e_hosted.py
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.2'

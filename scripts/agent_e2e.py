@@ -187,6 +187,7 @@ def clean_env(home, server, agent=""):
                "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "SystemRoot", "COMSPEC", "PATHEXT",
                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
                "SSL_CERT_FILE", "SSL_CERT_DIR", "CODEX_HOME", "DSH_HOME", "WORKBUDDY_CONFIG_DIR",
+               'PLAYWRIGHT_BROWSERS_PATH', 'PYTHONUTF8', 'PYTHONIOENCODING', 'LAZYMIND_PPT_EXTERNAL_OFFLINE',
                "OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
                "DEEPSEEK_API_KEY", "ARK_API_KEY", "VOLCENGINE_API_KEY"}
     if agent == "workbuddy":
@@ -615,6 +616,7 @@ def agent_command(name, directory, args, command, session=None):
                 route['api_key_env'] = 'LAZYMIND_CI_PROXY_SESSION'
         private_config(profile / 'providers.json', json.dumps(routes, indent=2))
         env.update(LAZYMIND_CI_PROXY_CONFIG=str(args.providers_config), LAZYMIND_CI_MANAGED_AGENT=name)
+        env['LAZYMIND_PPT_EXTERNAL_OFFLINE'] = '1'
     if name == "codex":
         config = codex_config(directory, entry, managed)
         if managed:
