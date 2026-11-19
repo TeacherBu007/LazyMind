@@ -108,6 +108,15 @@ def start(p):
             client.call('workflow.get', workflow_id=item['workflow_id'], revision_id=item['revision_id'])
     finally:
         client.close()
+    # Catalog reads do not allocate an Agent Host identity. Initialize it via
+    # the product's normal adapter constructor, using a separate CI Codex home.
+    identity_env = e2e.clean_env(p.home, 'http://localhost:8090', 'codex')
+    identity_env['CODEX_HOME'] = str(p.root / 'identity-bootstrap/codex')
+    Path(identity_env['CODEX_HOME']).mkdir(parents=True, mode=0o700, exist_ok=True)
+    subprocess.run([str(cli), 'internal', 'agent', 'codex', 'status'], env=identity_env,
+                   stdout=subprocess.DEVNULL, check=True, timeout=60)
+    if not (p.home / 'connector-host-id').is_file():
+        raise RuntimeError('Normal connector initialization did not create its host identity')
     e2e.write_json(p.output / 'hosted-runtime.json', {
         'status': 'passed', 'platform': sys.platform, 'authentication': 'normal local admin-session bootstrap',
         'source_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
