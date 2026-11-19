@@ -27,6 +27,7 @@
 ## 安装与隔离
 
 - Go 1.25.14、Node 22.22.2、pnpm 10.0.0、uv 0.12.10；Python 服务由 LazyMind 源码运行时管理器按其配置安装。
+- Python 的 CI 兼容约束见 `scripts/ci-agent-tools/python-constraints.txt`。UMAP / Numba / llvmlite 使用同时提供 Python 3.11 双平台预编译包的版本，避免无人值守环境临时编译 LLVM；不修改本机私有兼容配置。
 - Codex 0.151.0、DeepSeek Harness 0.2.1-rc.2，通过 `scripts/ci-agent-tools/package-lock.json` 安装。WorkBuddy 5.11.4.44121853 来自官方更新服务，安装前核对固定 SHA-256。使用的是 WorkBuddy 自带的 CLI。
 - PPT 导出依赖使用工作流自带锁文件安装，并安装、实际启动 Chromium。
 - 中文字幕使用来自 Google Fonts 官方仓库固定提交的 Noto Sans SC，核对 SHA-256 并验证汉字字形，附带字体许可；不依赖 Windows 是否预装中文字体。
