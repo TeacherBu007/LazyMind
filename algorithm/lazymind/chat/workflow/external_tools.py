@@ -11,15 +11,14 @@ import inspect
 from pathlib import PurePosixPath
 from typing import Any, get_type_hints
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
-from . import external_pdf_tools, external_ppt_tools, smoke_tools
+from . import external_image_tools, external_pdf_tools, external_ppt_tools, smoke_tools
 from . import paper_tools as paper_adapter
-from .paper_tools import PAPER_BINDING
 from .external_ppt_tools import ExternalToolError
 from .external_tool_context import external_package_scope
-
+from .paper_tools import PAPER_BINDING
 
 PPT_BINDING = '''"""Audited external PPT primitives; this binding is not an agent executor."""
 from lazymind.chat.workflow.external_ppt_tools import (
@@ -48,6 +47,12 @@ _REGISTRY.update({
 })
 
 MAX_PACKAGE_BYTES = 64 * 1024 * 1024
+
+IMAGE_BINDING = '''"""Shared native caption entry point; external execution uses the audited byte adapter."""
+from lazymind.chat.engine.tools.infra.image_workflow_support import meme_add_caption as meme_add_caption
+'''
+_REGISTRY['meme_add_caption'] = ('scripts/external_image_tools.py', IMAGE_BINDING,
+                                 external_image_tools.meme_add_caption)
 
 SMOKE_BINDING = '''"""Shared deterministic tools for the Workflow smoke test."""
 from lazymind.chat.workflow.smoke_tools import smoke_generate, smoke_update, smoke_verify

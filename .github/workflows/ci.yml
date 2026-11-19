@@ -158,6 +158,22 @@ jobs:
       - name: Doc check
         run: pip install pytest && python -m pytest tests/doc_check/ -v
 
+  test-agent-e2e-script:
+    needs: [lint, doc_check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install isolated test dependencies
+        run: python -m pip install Pillow==12.0.0 PyYAML==6.0.3
+      - name: Test Agent CI connection recovery without accounts or model calls
+        run: python -m unittest discover -s scripts/tests -p 'test_agent_e2e*.py' -v
+
   test-office-convert:
     needs: [lint, doc_check]
     runs-on: ubuntu-latest
