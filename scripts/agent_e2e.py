@@ -621,6 +621,10 @@ def agent_command(name, directory, args, command, session=None):
         config = codex_config(directory, entry, managed)
         if managed:
             env['CODEX_HOME'] = str(profile / 'codex')
+            if host_platform.IS_WINDOWS and os.environ.get('LAZYMIND_CI_CODEX_HOME'):
+                env['CODEX_HOME'] = os.environ['LAZYMIND_CI_CODEX_HOME']
+                if Path(env['CODEX_HOME']).resolve().is_relative_to(ROOT):
+                    raise providers.ProviderConfigurationError('Codex CI home must be outside the checkout.')
             Path(env['CODEX_HOME']).mkdir(mode=0o700, exist_ok=True)
         # Ignore unrelated user MCP entries, but retain the existing auth store.
         settings = tomllib.loads(config.read_text(encoding='utf-8'))
@@ -639,6 +643,8 @@ def agent_command(name, directory, args, command, session=None):
             # Give that job's workspace sandbox its required network access;
             # keep filesystem write limits and the approval reviewer enabled.
             overrides += ['--config', 'sandbox_workspace_write.network_access=true']
+            if host_platform.IS_WINDOWS and os.environ.get('LAZYMIND_CI_CODEX_HOME'):
+                overrides += ['--config', 'windows.sandbox="elevated"']
         cmd = command + ["exec"]
         if session:
             cmd += ["resume", session]
@@ -1107,11 +1113,72 @@ def resume_locked(args, path):
     return 0 if result["status"] == "passed" else 1
 
 
+def ppt_export_callback(directory, env):
+    """Trusted, offline native capability restricted to this fixed three-slide fixture."""
+    root = directory.resolve()
+    lock = threading.Lock()
+    calls = 0
+
+    def export(body):
+        nonlocal calls
+        if not isinstance(body, dict) or set(body) != {'deck_dir'} or not isinstance(body['deck_dir'], str):
+            raise ValueError('invalid_export_request')
+        deck = root / 'deck'
+        if deck.is_symlink() or deck.resolve() != deck or Path(body['deck_dir']).resolve() != deck:
+            raise ValueError('export_must_use_this_fixture_deck')
+        files = list(deck.rglob('*'))
+        allowed = {'.html', '.txt', '.md', '.json', '.svg', '.png', '.jpg', '.jpeg', '.pptx'}
+        if (len(files) > 40 or any(p.is_symlink() or (p.is_file() and p.suffix.lower() not in allowed) for p in files)
+                or sum(p.stat().st_size for p in files if p.is_file()) > 32 * 1024 * 1024
+                or {p.name for p in (deck / 'pages').glob('*.html')} != {'page_001.html', 'page_002.html', 'page_003.html'}):
+            raise ValueError('invalid_three_slide_fixture')
+        if not lock.acquire(blocking=False):
+            raise ValueError('export_already_running')
+        try:
+            calls += 1
+            if calls > 3:
+                raise ValueError('export_repair_budget_exhausted')
+            exporter = ROOT / 'workflows/ppt-workflow/runtime/scripts/export_pptx/html_to_pptx.mjs'
+            # No model credentials or GitHub credentials enter Chromium.
+            allowed_env = {'HOME', 'USER', 'LOGNAME', 'PATH', 'TMPDIR', 'TEMP', 'TMP', 'LANG',
+                           'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SYSTEMROOT', 'SystemRoot',
+                           'COMSPEC', 'PATHEXT', 'PLAYWRIGHT_BROWSERS_PATH'}
+            export_env = {k: v for k, v in env.items() if k in allowed_env}
+            export_env['LAZYMIND_PPT_EXTERNAL_OFFLINE'] = '1'
+            node = shutil.which('node', path=env.get('PATH'))
+            if not node:
+                raise ValueError('node_not_installed')
+            tree = host_platform.ProcessTree([node, str(exporter), '--deck-dir', str(deck),
+                '--output', 'presentation.pptx', '--force', '--no-embed-fonts'], cwd=root, env=export_env,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                stdout, stderr = tree.process.communicate(timeout=240)
+            except subprocess.TimeoutExpired:
+                tree.stop(force=True)
+                tree.process.communicate(timeout=15)
+                return {'status': 'failed', 'error': 'native_ppt_export_timeout'}
+            finally:
+                tree.close()
+            payload = next((json.loads(line) for line in reversed(stdout.decode('utf-8', errors='replace').splitlines())
+                            if line.startswith('{') and line.endswith('}')), {})
+            if tree.process.returncode or not payload.get('success') or payload.get('converted') != 3:
+                return {'status': 'failed', 'error': safe_diagnostic(payload.get('error') or stderr.decode('utf-8', errors='replace'))}
+            check = validate_file(deck / 'presentation.pptx', 'ppt')
+            return {'status': 'ok', 'path': str(deck / 'presentation.pptx'), **check}
+        finally:
+            lock.release()
+    return export
+
+
 def invoke(command, env, prompt, directory, timeout):
     config_path = env.get('LAZYMIND_CI_PROXY_CONFIG')
     if config_path:
         supplied = providers.load(config_path, required=True)
-        with providers.ModelProxy(supplied) as proxy:
+        context_file = directory / 'connection.json'
+        context = json.loads(context_file.read_text(encoding='utf-8')) if context_file.is_file() else {}
+        native_export = ppt_export_callback(directory, env) if (context.get('mode') == 'business'
+                        and context.get('workflow_id') == 'ppt-workflow' and env.get('LAZYMIND_CI_MANAGED_AGENT')) else None
+        with providers.ModelProxy(supplied, ppt_export=native_export) as proxy:
             child_env = {k: v for k, v in env.items() if not k.startswith('LAZYMIND_CI_') and not k.endswith(('_API_KEY', '_AUTH_TOKEN'))}
             child_env.update(CODEBUDDY_BASE_URL=proxy.base_url, CODEBUDDY_API_KEY=proxy.token,
                              LAZYMIND_CI_LLM_BASE_URL=proxy.base_url, LAZYMIND_CI_IMAGE_BASE_URL=proxy.base_url,
@@ -1318,6 +1385,14 @@ def run_case(args, agent, case, commands):
         supplied = providers.load(args.providers_config, require_image=case == 'meme' and not args.probe) if agent == 'workbuddy' or getattr(args, 'managed_models', False) else None
         if supplied:
             result['provider_routes'] = providers.public(supplied)
+            if case == 'ppt' and getattr(args, 'managed_models', False):
+                route_path = args.private_profile_root / directory.name / 'providers.json'
+                helper = host_platform.shell_command([sys.executable, str(SCRIPT), 'provider-ppt-export',
+                    '--providers-config', str(route_path), '--deck-dir', str(directory / 'deck')])
+                prompt += ('\n本次 CI 的可信原生导出服务可调用已安装的 Chromium。请先在 deck/pages 写入上述三个 HTML 文件，'
+                           '然后通过宿主终端执行以下辅助命令导出真实 PPTX：\n' + helper +
+                           '\n本次导出应使用该服务，避免 Agent 沙箱无法启动 Chromium。服务仅接受本测试 deck 目录、离线资源、'
+                           '固定三页和禁用字体嵌入；不得伪造返回结果。成功后仍须发布实际 PPTX 并完成工作流步骤。')
             if case == 'meme' and 'image' in supplied:
                 route_path = args.private_profile_root / directory.name / 'providers.json'
                 helper = host_platform.shell_command([sys.executable, str(SCRIPT), 'provider-image', '--providers-config', str(route_path),
@@ -1378,7 +1453,7 @@ def main():
         if hasattr(stream, 'reconfigure'):
             stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("doctor", "run", "observe", "setup-dsh", "report", "resume", "build-cli", 'config-check', 'provider-image'))
+    parser.add_argument("action", choices=("doctor", "run", "observe", "setup-dsh", "report", "resume", "build-cli", 'config-check', 'provider-image', 'provider-ppt-export'))
     parser.add_argument("--cli")
     parser.add_argument("--home", type=Path, default=Path.home() / ".lazymind")
     parser.add_argument("--server", help="Expected loopback origin; defaults to the current LazyMind credential scope")
@@ -1391,6 +1466,7 @@ def main():
     parser.add_argument('--managed-models', action='store_true', help='Use fresh CI model routes for all three Agents')
     parser.add_argument('--image-output', type=Path)
     parser.add_argument('--image-prompt')
+    parser.add_argument('--deck-dir', type=Path)
     parser.add_argument("--agent", choices=(*AGENTS, "all"), default="all")
     parser.add_argument("--case", choices=(*CASES, "all"), default="all")
     parser.add_argument("--timeout", type=int, default=1200)
@@ -1404,6 +1480,13 @@ def main():
     args.home = args.home.expanduser().resolve()
     args.providers_config = args.providers_config.expanduser().resolve()
     args.private_profile_root = args.private_profile_root.expanduser().resolve()
+    if args.action == 'provider-ppt-export':
+        supplied = providers.load(args.providers_config, required=True)
+        if urllib.parse.urlsplit(supplied['llm']['base_url']).hostname != '127.0.0.1' or not args.deck_dir:
+            raise ValueError('Native CI export requires this turn\'s loopback capability')
+        result = providers.request_json(supplied['llm'], '/ci/ppt-export', {'deck_dir': str(args.deck_dir)}, timeout=260)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result.get('status') == 'ok' else 1
     if args.action in ('config-check', 'provider-image'):
         try:
             supplied = providers.load(args.providers_config, required=True,

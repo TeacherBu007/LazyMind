@@ -4,12 +4,14 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 from pathlib import Path
 import secrets
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 import zipfile
 from types import SimpleNamespace
@@ -193,8 +195,68 @@ def install_font(p):
     print('Verified pinned Noto Sans SC and Chinese caption glyphs.', flush=True)
 
 
+def setup_codex_windows_sandbox(p, command):
+    """Use Codex's normal setup API; no unsandboxed Agent fallback."""
+    home = p.root / 'codex-home'
+    home.mkdir(mode=0o700, exist_ok=True)
+    env = e2e.clean_env(p.home, 'http://localhost:8090')
+    env['CODEX_HOME'] = str(home)
+    tree = platform.ProcessTree(command + ['--config', 'windows.sandbox="elevated"',
+        '--config', 'sandbox_mode="workspace-write"', '--config', 'sandbox_workspace_write.network_access=true',
+        'app-server'], cwd=p.output, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    messages = queue.Queue()
+    def read():
+        for line in tree.process.stdout:
+            try:
+                messages.put(json.loads(line))
+            except ValueError:
+                pass
+        messages.put({'error': {'message': 'Codex setup process exited'}})
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    def send(message):
+        tree.process.stdin.write((json.dumps(message) + '\n').encode())
+        tree.process.stdin.flush()
+    def receive(*, request_id=None, method=None):
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            try:
+                message = messages.get(timeout=max(.01, deadline - time.monotonic()))
+            except queue.Empty:
+                raise RuntimeError('Codex Windows sandbox setup timed out') from None
+            if message.get('error'):
+                raise RuntimeError('Codex Windows sandbox setup RPC failed: ' + e2e.safe_diagnostic(message['error']))
+            if (request_id is not None and message.get('id') == request_id) or (method and message.get('method') == method):
+                return message.get('result', message.get('params', {}))
+        raise RuntimeError('Codex Windows sandbox setup timed out')
+    try:
+        send({'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'lazymind-ci', 'version': '1'},
+                                                     'capabilities': {'experimentalApi': True}}})
+        receive(request_id=1)
+        send({'method': 'initialized', 'params': {}})
+        send({'id': 2, 'method': 'windowsSandbox/readiness', 'params': {}})
+        state = receive(request_id=2)
+        if state.get('status') != 'ready':
+            print('Initializing the official elevated Codex Windows sandbox.', flush=True)
+            send({'id': 3, 'method': 'windowsSandbox/setupStart', 'params': {'mode': 'elevated', 'cwd': str(p.output)}})
+            if not receive(request_id=3).get('started'):
+                raise RuntimeError('Codex Windows sandbox setup did not start')
+            completion = receive(method='windowsSandbox/setupCompleted')
+            if not completion.get('success'):
+                raise RuntimeError('Codex Windows sandbox setup failed: ' + e2e.safe_diagnostic(completion.get('error')))
+        print('Official Codex Windows sandbox setup passed.', flush=True)
+    finally:
+        tree.process.stdin.close()
+        tree.close()
+        tree.process.wait(timeout=15)
+        reader.join(timeout=2)
+        tree.process.stdout.close()
+    return home
+
+
 def install_agents(p):
     """Install pinned vendor distributions, without a desktop login dependency."""
+    p.output.mkdir(parents=True, exist_ok=True)
     tools = p.root / 'agent-tools'
     tools.mkdir(exist_ok=True)
     for name in ('package.json', 'package-lock.json'):
@@ -249,10 +311,14 @@ def install_agents(p):
                    env=env, timeout=120, check=True, stdout=subprocess.DEVNULL)
     e2e.private_config(p.root / 'agent-commands.json', json.dumps(commands))
     versions = {name: e2e.version(command) for name, command in commands.items()}
-    e2e.write_json(p.output / 'installed-agents.json', {'versions': versions, 'workbuddy_distribution_sha256': digest})
+    sandbox_home = setup_codex_windows_sandbox(p, commands['codex']) if platform.IS_WINDOWS else None
+    e2e.write_json(p.output / 'installed-agents.json', {'versions': versions, 'workbuddy_distribution_sha256': digest,
+                   'codex_windows_sandbox': 'elevated setup passed' if sandbox_home else 'not applicable'})
     if any(value == 'unavailable' for value in versions.values()):
         raise RuntimeError('An installed Agent could not report its version')
     with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as stream:
+        if sandbox_home:
+            stream.write(f'LAZYMIND_CI_CODEX_HOME={sandbox_home}\n')
         for key, value in {'HOSTED_ROOT': p.root, 'LAZYMIND_CI_AGENT_COMMANDS': p.root / 'agent-commands.json',
                            'DSH_HOME': p.root / 'dsh', 'WORKBUDDY_CONFIG_DIR': p.root / 'workbuddy-config'}.items():
             stream.write(f'{key}={value}\n')

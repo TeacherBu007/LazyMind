@@ -128,10 +128,11 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 class ModelProxy:
     """Own provider credentials; the Agent receives only a transient loopback token."""
-    def __init__(self, config):
+    def __init__(self, config, ppt_export=None):
         self.token = secrets.token_urlsafe(32)
         self.config = config
         self.diagnostics = []
+        self.ppt_export = ppt_export
         owner = self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -150,6 +151,21 @@ class ModelProxy:
                     self.reject(401, 'ci_proxy_authentication_required')
                     return
                 route = self.path.removeprefix('/v1')
+                if route == '/ci/ppt-export' and owner.ppt_export:
+                    try:
+                        length = int(self.headers.get('Content-Length', '0'))
+                        if not 0 < length <= 4096:
+                            raise ValueError('invalid_export_request')
+                        result = owner.ppt_export(json.loads(self.rfile.read(length)))
+                        raw = json.dumps(result, ensure_ascii=False).encode()
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Content-Length', str(len(raw)))
+                        self.end_headers()
+                        self.wfile.write(raw)
+                    except (OSError, ValueError, RuntimeError):
+                        self.reject(400, 'ci_ppt_export_rejected')
+                    return
                 name = 'image' if route == '/images/generations' else 'llm'
                 if route not in ('/chat/completions', '/responses', '/images/generations') or name not in owner.config:
                     self.reject(404, 'ci_proxy_route_unavailable')

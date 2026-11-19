@@ -199,6 +199,27 @@ class ModelProxyTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, status)
         self.assertEqual(self.received, [])
 
+    def test_native_export_requires_current_token_and_is_not_forwarded_to_model_provider(self):
+        seen = []
+        def export(body):
+            seen.append(body)
+            return {'status': 'ok', 'slides': 3}
+        for enabled in (False, True):
+            with providers.ModelProxy(self.config, ppt_export=export if enabled else None) as proxy:
+                for token, expected in (('wrong', 401), (proxy.token, 200 if enabled else 404)):
+                    request = urllib.request.Request(proxy.base_url + '/ci/ppt-export',
+                        data=json.dumps({'deck_dir': 'fixture/deck'}).encode(),
+                        headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+                    if expected == 200:
+                        with urllib.request.urlopen(request, timeout=5) as response:
+                            self.assertEqual(json.load(response), {'status': 'ok', 'slides': 3})
+                    else:
+                        with self.assertRaises(urllib.error.HTTPError) as raised:
+                            urllib.request.urlopen(request, timeout=5)
+                        self.assertEqual(raised.exception.code, expected)
+        self.assertEqual(seen, [{'deck_dir': 'fixture/deck'}])
+        self.assertEqual(self.received, [])
+
     def test_responses_sse_and_json_keep_output_and_adapt_only_usage_breakdown(self):
         value = {'output': [{'text': 'actual response'}], 'usage': {'input_tokens': 10,
             'input_tokens_details': {'cached_tokens': 5, 'cache_write_tokens_details': {'ttl_12h_tokens': 0}}}}

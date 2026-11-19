@@ -358,6 +358,29 @@ class ConnectionFallbackTests(unittest.TestCase):
 
 
 class RunnerBoundaryTests(unittest.TestCase):
+    def test_native_export_rejects_external_directories_commands_and_symlinks_before_starting_processes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            callback = runner.ppt_export_callback(root, {})
+            with patch.object(runner.host_platform, 'ProcessTree') as process:
+                for body in ({'deck_dir': str(root.parent)}, {'deck_dir': str(root / 'deck'), 'command': 'unexpected'},
+                             {'deck_dir': None}):
+                    with self.assertRaises(ValueError):
+                        callback(body)
+                deck = root / 'deck'
+                (deck / 'pages').mkdir(parents=True)
+                for i in range(1, 4):
+                    (deck / 'pages' / f'page_{i:03}.html').write_text('<html>fixture</html>')
+                try:
+                    (deck / 'linked.html').symlink_to(root / 'outside.html')
+                except OSError:
+                    # Windows without symlink privileges still checks the directory/command guards.
+                    pass
+                else:
+                    with self.assertRaises(ValueError):
+                        callback({'deck_dir': str(deck)})
+                process.assert_not_called()
+
     def test_image_artifact_file_handoff_verifies_published_bytes(self):
         from PIL import Image
         with tempfile.TemporaryDirectory() as tmp:
