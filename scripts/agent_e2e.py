@@ -524,11 +524,18 @@ def ensure_current_cli(args):
             build_cli(args)
 
 
-def codex_config(directory, entry):
+def codex_config(directory, entry, managed=None):
     """Keep the user's authenticated model route, exclude unrelated MCP servers."""
     home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
     original = home / "config.toml"
-    config = tomllib.loads(original.read_text(encoding='utf-8')) if original.exists() else {}
+    config = tomllib.loads(original.read_text(encoding='utf-8')) if original.exists() and not managed else {}
+    if managed:
+        if managed['llm']['api'] != 'openai-responses':
+            raise providers.ProviderConfigurationError('Codex CI requires an OpenAI Responses model route.')
+        config = {'model': managed['llm']['model'], 'model_provider': 'lazymind-ci',
+                  'model_reasoning_effort': 'low', 'model_providers': {'lazymind-ci': {
+                      'name': 'LazyMind CI', 'base_url': 'http://127.0.0.1:1/v1',
+                      'wire_api': 'responses', 'env_key': 'OPENAI_API_KEY'}}}
     rows = []
     for key in ("model", "model_provider", "model_reasoning_effort"):
         if key in config:
@@ -592,8 +599,23 @@ def agent_command(name, directory, args, command, session=None):
     if host_id.is_file():
         entry["env"]["LAZYMIND_AGENT_HOST_ID"] = host_id.read_text(encoding='utf-8').strip()
     env = clean_env(args.home, args.server, name)
+    managed = providers.load(args.providers_config, required=True) if getattr(args, 'managed_models', False) else None
+    if managed:
+        profile = args.private_profile_root / directory.name
+        profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if profile.resolve().is_relative_to(ROOT):
+            raise providers.ProviderConfigurationError('CI 私有运行目录必须位于仓库外。')
+        routes = {'version': 1, **providers.public(managed)}
+        for route in routes.values():
+            if isinstance(route, dict):
+                route['api_key_env'] = 'CODEBUDDY_API_KEY'
+        private_config(profile / 'providers.json', json.dumps(routes, indent=2))
+        env.update(LAZYMIND_CI_PROXY_CONFIG=str(args.providers_config), LAZYMIND_CI_MANAGED_AGENT=name)
     if name == "codex":
-        config = codex_config(directory, entry)
+        config = codex_config(directory, entry, managed)
+        if managed:
+            env['CODEX_HOME'] = str(profile / 'codex')
+            Path(env['CODEX_HOME']).mkdir(mode=0o700, exist_ok=True)
         # Ignore unrelated user MCP entries, but retain the existing auth store.
         settings = tomllib.loads(config.read_text(encoding='utf-8'))
         overrides = []
@@ -650,6 +672,10 @@ def agent_command(name, directory, args, command, session=None):
         return cmd, env
     context = json.loads((directory / "connection.json").read_text(encoding='utf-8'))
     patch = dsh_connection_patch(command, env, args)
+    if managed:
+        # The loopback port changes on every turn. invoke() supplies this overlay
+        # after the proxy starts; no upstream credential reaches the Agent.
+        env['LAZYMIND_CI_DSH_PATCH'] = str(directory / 'dsh-model.patch.json')
     patch.append({"insert": [{"id": "mcp-lazymind-ci-" + context["generation"], "name": "@deepseek-ai/dsh-mcp-client",
                          "config": {"serverName": "lazymind", "transport": "stdio", **entry,
                                     "failOnStartupError": True}}]})
@@ -657,6 +683,8 @@ def agent_command(name, directory, args, command, session=None):
     # JSON is valid YAML; avoid a separate YAML dependency.
     private_config(overlay, json.dumps(patch, ensure_ascii=False, indent=2))
     cmd = command + ["--profile", args.dsh_profile, "--patch", str(overlay), "--json"]
+    if managed:
+        cmd[-1:-1] = ['--patch', env['LAZYMIND_CI_DSH_PATCH']]
     if session:
         cmd += ["--session-id", session]
     return cmd, env
@@ -1064,6 +1092,22 @@ def invoke(command, env, prompt, directory, timeout):
             child_env = {k: v for k, v in env.items() if not k.startswith('LAZYMIND_CI_') and not k.endswith(('_API_KEY', '_AUTH_TOKEN'))}
             child_env.update(CODEBUDDY_BASE_URL=proxy.base_url, CODEBUDDY_API_KEY=proxy.token,
                              LAZYMIND_CI_LLM_BASE_URL=proxy.base_url, LAZYMIND_CI_IMAGE_BASE_URL=proxy.base_url)
+            if env.get('LAZYMIND_CI_MANAGED_AGENT') == 'codex':
+                child_env['OPENAI_API_KEY'] = proxy.token
+                # Append a CLI override after the placeholder, before stdin '-'.
+                command = [*command[:-1], '--config',
+                           'model_providers.lazymind-ci.base_url=' + json.dumps(proxy.base_url), command[-1]]
+            if env.get('LAZYMIND_CI_DSH_PATCH'):
+                profile = {'apiKeyEnv': 'CODEBUDDY_API_KEY', 'api': 'openai-responses'
+                           if supplied['llm']['api'] == 'openai-responses' else 'openai-completions',
+                           'baseURL': proxy.base_url, 'transport': 'sse', 'models': [{
+                               'id': supplied['llm']['model'], 'name': supplied['llm']['model'],
+                               'contextWindow': 200000, 'maxTokens': 16384, 'input': ['text'],
+                               'reasoningEfforts': False}]}
+                private_config(env['LAZYMIND_CI_DSH_PATCH'], json.dumps([
+                    {'id': 'llm-pi-ai', 'config': {'providers': {'lazymind-ci': profile}}},
+                    {'id': 'agent-default-model', 'config': {'provider': 'lazymind-ci',
+                                                          'model': supplied['llm']['model']}}]))
             result = invoke_process(command, child_env, prompt, directory, timeout)
             result['provider_diagnostics'] = proxy.diagnostics
             return result
@@ -1205,7 +1249,7 @@ def run_case(args, agent, case, commands):
                   + task + ("\n完整读取materials.md。" if case != "meme" else ""))
         if case == "ppt":
             exporter = ROOT / "workflows/ppt-workflow/runtime/scripts/export_pptx/html_to_pptx.mjs"
-            browsers = args.home.parent / "Library/Application Support/LazyMind/deps/editable-ppt/browsers"
+            browsers = Path(os.environ.get('PLAYWRIGHT_BROWSERS_PATH', str(args.home.parent / "Library/Application Support/LazyMind/deps/editable-ppt/browsers")))
             prompt += (f"\n宿主可使用已安装的确定性PPT导出程序：{exporter}。"
                        "当服务端ppt_export_html不可用时，使用宿主终端执行该程序，不能标记完成或交付HTML冒充PPTX。"
                        "命令为node <上述程序> --deck-dir <本测试目录的deck子目录> --output presentation.pptx --force --no-embed-fonts；"
@@ -1219,7 +1263,7 @@ def run_case(args, agent, case, commands):
                        "通过文件解码检查尺寸与帧数。外层测试控制器将读取真实最终图片补做视觉验收，"
                        "不要声称自己已经目视检查。生成工具若返回1024方图，可在宿主等比例缩为请求的512方图，"
                        "再将该真实底图发布供字幕步骤使用。")
-        supplied = providers.load(args.providers_config, require_image=case == 'meme' and not args.probe) if agent == 'workbuddy' else None
+        supplied = providers.load(args.providers_config, require_image=case == 'meme' and not args.probe) if agent == 'workbuddy' or getattr(args, 'managed_models', False) else None
         if supplied:
             result['provider_routes'] = providers.public(supplied)
             if case == 'meme' and 'image' in supplied:
@@ -1227,7 +1271,7 @@ def run_case(args, agent, case, commands):
                 helper = host_platform.shell_command([sys.executable, str(SCRIPT), 'provider-image', '--providers-config', str(route_path),
                                      '--image-output', str(directory / 'generated-base.png'), '--image-prompt', '<本步骤的无文字英文生图提示词>'])
                 prompt += ('\n本次 CI 使用已验证的独立生图服务。generate_image 步骤通过宿主终端执行以下可信辅助程序发起真实生图：\n'
-                           + helper + '\n不要使用 WorkBuddy 默认 ImageGen 或替代模型，不要读取配置内容或环境变量。'
+                           + helper + '\n不要使用 Agent 默认生图工具或替代模型，不要读取配置内容或环境变量。'
                            '辅助程序从私有配置读取密钥并返回真实512方图路径和哈希；将该文件发布为 generated_base_image。'
                            'enhance_image 步骤仍须调用 LazyMind 声明的 meme_add_caption，按其 schema 通过文件传递图片字节，发布最终字幕图片。')
         if args.probe:
@@ -1290,6 +1334,7 @@ def main():
     parser.add_argument('--providers-config', type=Path, default=Path(os.environ.get('LAZYMIND_CI_PROVIDERS_CONFIG', providers.DEFAULT_PATH)),
                         help='仓库外私有模型配置；先复制 agent_e2e.providers.example.json，或使用 CI Secrets 环境变量')
     parser.add_argument('--private-profile-root', type=Path, default=Path.home() / '.config/lazymind-ci/workbuddy-profiles')
+    parser.add_argument('--managed-models', action='store_true', help='Use fresh CI model routes for all three Agents')
     parser.add_argument('--image-output', type=Path)
     parser.add_argument('--image-prompt')
     parser.add_argument("--agent", choices=(*AGENTS, "all"), default="all")

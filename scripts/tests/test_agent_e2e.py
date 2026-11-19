@@ -36,6 +36,40 @@ def connection_fixture(root):
 
 
 class ConnectionFallbackTests(unittest.TestCase):
+    def test_managed_routes_keep_upstream_keys_out_of_all_three_agent_processes(self):
+        for agent in runner.AGENTS:
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                args = connection_fixture(root)
+                args.managed_models = True
+                args.providers_config = root / 'private.json'
+                args.private_profile_root = root / 'profiles'
+                runner.private_config(args.providers_config, json.dumps({'version': 1, 'llm': {
+                    'api_key': 'fixture-upstream-key', 'base_url': 'https://model.example/v1',
+                    'model': 'fixture-model', 'api': 'openai-responses'}}))
+                directory = root / 'run'
+                directory.mkdir()
+                runner.prepare_connection(args, directory, 'image-workflow', 'revision', 'probe')
+                with patch.object(runner, 'dsh_connection_patch', return_value=[]):
+                    command, env = runner.agent_command(agent, directory, args, ['node', str(root / 'cli/bin/codebuddy')])
+                with patch.object(runner, 'invoke_process', return_value={}) as invoke:
+                    runner.invoke(command, env, 'probe', directory, 10)
+                child_command, child_env = invoke.call_args.args[:2]
+                self.assertNotIn('fixture-upstream-key', json.dumps(child_command) + json.dumps(child_env))
+                self.assertNotIn('LAZYMIND_CI_PROXY_CONFIG', child_env)
+                self.assertTrue(child_env['CODEBUDDY_BASE_URL'].startswith('http://127.0.0.1:'))
+                if agent == 'codex':
+                    self.assertEqual(child_env['OPENAI_API_KEY'], child_env['CODEBUDDY_API_KEY'])
+                    self.assertIn('model_providers.lazymind-ci.base_url=' + json.dumps(child_env['CODEBUDDY_BASE_URL']), child_command)
+                    self.assertTrue(Path(child_env['CODEX_HOME']).is_relative_to(args.private_profile_root))
+                if agent == 'deepseek-harness':
+                    overlay = json.loads(Path(env['LAZYMIND_CI_DSH_PATCH']).read_text())
+                    self.assertEqual(overlay[0]['config']['providers']['lazymind-ci']['baseURL'], child_env['CODEBUDDY_BASE_URL'])
+                    self.assertIn(str(directory / 'dsh.patch.yml'), child_command)
+                for path in args.private_profile_root.rglob('*'):
+                    if path.is_file():
+                        self.assertNotIn('fixture-upstream-key', path.read_text())
+
     def test_custom_workbuddy_provider_keys_stay_with_parent_and_profiles_use_proxy_references(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
