@@ -717,6 +717,18 @@ def trace_events(directory):
     return values
 
 
+def provider_block_reason(turn):
+    """Quota exhaustion cannot be repaired by reconnecting an Agent."""
+    for item in turn.get('provider_diagnostics', []):
+        if (item.get('code') in ('credit_balance_exhausted', 'insufficient_quota', 'billing_hard_limit_reached')
+                or item.get('type') == 'insufficient_quota'):
+            return 'provider_quota_exhausted'
+    if any(re.search(r'(?i)no credits remaining|credit_balance_exhausted|insufficient_quota', str(value))
+           for value in turn.get('diagnostics', [])):
+        return 'provider_quota_exhausted'
+    return None
+
+
 def connection_probe_passed(events, context, turn):
     calls = {e.get("tool") for e in events if e.get("event") == "tool_call"}
     succeeded = {e.get("tool") for e in events if e.get("event") == "tool_result" and not e.get("error")}
@@ -756,6 +768,8 @@ def probe_agent_connection(args, agent, directory, command, workflow_id, revisio
         assert_connection(args, expected)
         if passed:
             return attempts
+        if reason := provider_block_reason(turn):
+            raise ConnectionGuardError(reason)
         if any("Authentication required" in d or "not logged in" in d for d in turn["diagnostics"]):
             raise ConnectionGuardError("host_authentication_required")
     raise ConnectionGuardError("connection_recovery_exhausted")
@@ -996,11 +1010,13 @@ def finish_run(args, result, directory, client, commands):
         turn = invoke(command, env, prompt, directory, max(1, min(args.timeout, int(deadline - time.monotonic()))))
         result["turns"].append(turn)
         write_json(directory / "result.json", result)
-        if turn["timed_out"] or turn["exit_code"]:
+        if turn["timed_out"] or turn["exit_code"] or turn.get('host_error'):
             break
     last_turn = result["turns"][-1] if result["turns"] else {}
-    reason = "host_execution_error" if last_turn.get("exit_code") and not last_turn.get("timed_out") else "execution_budget_exhausted"
-    result.update(status="failed", reason=reason)
+    provider_reason = provider_block_reason(last_turn)
+    reason = provider_reason or ("host_execution_error" if (last_turn.get("exit_code") or last_turn.get('host_error'))
+                                and not last_turn.get("timed_out") else "execution_budget_exhausted")
+    result.update(status="blocked" if provider_reason else "failed", reason=reason)
     client.call("workflow.session.stop", session_id=session, command_id="e2e-budget-stop-" + session)
 
 
@@ -1214,7 +1230,7 @@ def invoke(command, env, prompt, directory, timeout):
                     {'id': 'agent-default-model', 'config': {'provider': 'lazymind-ci',
                                                           'model': supplied['llm']['model']}}]))
             result = invoke_process(command, child_env, prompt, directory, timeout)
-            result['provider_diagnostics'] = proxy.diagnostics
+            result['provider_diagnostics'] = proxy.diagnostics[-8:]
             return result
     return invoke_process(command, env, prompt, directory, timeout)
 
@@ -1350,7 +1366,7 @@ def invoke_process(command, env, prompt, directory, timeout):
 
 def failure_diagnostics(result, directory):
     """Publish only bounded summaries; never raw events, tool inputs or profiles."""
-    fields = ("exit_code", "timed_out", "host_error", "seconds", "event_types", "diagnostics", "last_message")
+    fields = ("exit_code", "timed_out", "host_error", "seconds", "event_types", "diagnostics", "last_message", "provider_diagnostics")
     details = {"agent": result["agent"], "case": result["case"], "reason": result.get("reason"),
                "turns": [{k: turn.get(k) for k in fields} for turn in result.get("turns", [])],
                "connection_attempts": [{"status": attempt["status"],
@@ -1458,7 +1474,9 @@ def run_case(args, agent, case, commands):
             assert_connection(args, expected)
             events = trace_events(directory)
             result["tools_called"] = sorted({e["tool"] for e in events if e.get("event") == "tool_call"})
-            if turn["host_error"]:
+            if (turn.get('host_error') or turn.get('exit_code') or turn.get('timed_out')) and (reason := provider_block_reason(turn)):
+                result.update(status='blocked', reason=reason)
+            elif turn["host_error"]:
                 authentication = any("Authentication required" in d for d in turn["diagnostics"])
                 result.update(status="blocked" if authentication else "failed",
                               reason="host_authentication_required" if authentication else "host_execution_error")

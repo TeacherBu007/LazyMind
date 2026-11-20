@@ -36,6 +36,32 @@ def connection_fixture(root):
 
 
 class ConnectionFallbackTests(unittest.TestCase):
+    def test_provider_quota_exhaustion_does_not_reconnect_any_agent(self):
+        for agent in runner.AGENTS:
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                args = connection_fixture(root)
+                directory = root / 'run'
+                directory.mkdir()
+                turn = {'exit_code': 1, 'host_error': False, 'seconds': .01, 'diagnostics': [],
+                        'provider_diagnostics': [{'status': 429, 'route': '/responses',
+                            'code': 'credit_balance_exhausted', 'type': 'insufficient_quota'}]}
+                with (patch.object(runner, 'agent_command', return_value=([agent], {})),
+                      patch.object(runner, 'invoke', return_value=turn) as invoke,
+                      self.assertRaisesRegex(runner.ConnectionGuardError, 'provider_quota_exhausted')):
+                    runner.probe_agent_connection(args, agent, directory, [agent],
+                        'image-workflow', 'revision', runner.connection_snapshot(args))
+                self.assertEqual(invoke.call_count, 1)
+                attempts = json.loads((directory / 'connection-attempts.json').read_text())
+                self.assertEqual(len(attempts), 1)
+                self.assertEqual(attempts[0]['turn']['provider_diagnostics'][0]['status'], 429)
+
+    def test_request_throttling_is_not_classified_as_exhausted_credit(self):
+        self.assertIsNone(runner.provider_block_reason({'provider_diagnostics': [
+            {'status': 429, 'code': 'rate_limit_exceeded', 'type': 'requests'}]}))
+        self.assertEqual(runner.provider_block_reason({'diagnostics': ['429 You have no credits remaining.']}),
+                         'provider_quota_exhausted')
+
     def test_managed_routes_keep_upstream_keys_out_of_all_three_agent_processes(self):
         for agent in runner.AGENTS:
             with self.subTest(agent=agent), tempfile.TemporaryDirectory() as tmp:
@@ -510,6 +536,31 @@ timer.cancel()
             self.assertEqual(result['status'], 'failed')
             self.assertEqual(result['reason'], 'host_execution_failed_after_business_completion')
 
+    def test_resumed_host_error_with_zero_exit_stops_further_turns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / 'mcp.jsonl').write_text(json.dumps({
+                'tool': 'workflow.start', 'session_id': 'run', 'revision_id': 'revision'}) + '\n')
+            result = {'agent': 'workbuddy', 'case': 'paper', 'revision_id': 'revision',
+                      'turns': [{'exit_code': 0, 'seconds': .01, 'host_session_id': 'host'}]}
+            class Client:
+                def __init__(self):
+                    self.calls = []
+                def call(self, name, **kwargs):
+                    self.calls.append(name)
+                    return {'control': {'continuation': 'continue'},
+                            'projection': {'completed': False}, 'state_version': 1}
+            client = Client()
+            turn = {'exit_code': 0, 'timed_out': False, 'host_error': True, 'seconds': .01,
+                    'diagnostics': ['429 You have no credits remaining.']}
+            with (patch.object(runner, 'agent_command', return_value=(['fixture'], {})),
+                  patch.object(runner, 'invoke', return_value=turn) as invoke):
+                runner.finish_run(SimpleNamespace(timeout=30, max_turns=6), result, directory, client, {'workbuddy': ['fixture']})
+            self.assertEqual(invoke.call_count, 1)
+            self.assertEqual(client.calls, ['workflow.state', 'workflow.session.stop'])
+            self.assertEqual(result['status'], 'blocked')
+            self.assertEqual(result['reason'], 'provider_quota_exhausted')
+
     def test_pending_review_is_not_a_completed_business_result(self):
         class Client:
             def call(self, name, **kwargs):
@@ -545,12 +596,15 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
 print(json.dumps({'type':'assistant','message':{'content':[{'type':'thinking','thinking':'private-reasoning'},{'type':'text','text':'Export failed '+os.environ['OPENAI_API_KEY']+' '+os.environ['LAZYMIND_CI_PROXY_SESSION']}]}}))
 ''']
             turn = runner.invoke_process(command, env, '', directory, 5)
+            turn['provider_diagnostics'] = [{'status': 429, 'route': '/responses',
+                                             'code': 'credit_balance_exhausted', 'type': 'insufficient_quota'}]
             result = {'agent':'codex','case':'ppt','reason':'business_step_failed:generate_ppt',
                       'turns':[turn], 'private_profile':'must-not-be-published'}
             with runner.contextlib.redirect_stdout(io.StringIO()):
                 runner.failure_diagnostics(result, directory)
             public = (directory / 'failure-diagnostics.json').read_text()
             self.assertIn('Export failed', public)
+            self.assertIn('credit_balance_exhausted', public)
             for private in ('private-reasoning', env['OPENAI_API_KEY'], env['LAZYMIND_CI_PROXY_SESSION'], 'must-not-be-published'):
                 self.assertNotIn(private, public)
 
