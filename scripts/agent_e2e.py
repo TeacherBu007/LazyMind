@@ -41,7 +41,7 @@ AGENTS = ("codex", "workbuddy", "deepseek-harness")
 CASES = {
     "ppt": ("ppt-workflow", "使用 PPT 工作流，根据本目录 materials.md 制作3页中文演示文稿。主题为检索增强生成测试，受众为软件测试工程师，科研风格、白底黑字，禁用AI背景图，不联网、不使用模板。必须交付可下载的PPTX，包含目标、方法和结论，不得把HTML预览当成PPTX交付。"),
     "paper": ("paper-writing", "使用论文写作工作流，仅根据本目录 materials.md 写一篇约800字的中文短论文，主题为检索增强生成系统的功能测试方法。输入是研究材料，先生成论文大纲，经测试用户确认后生成正文并结束。无需选题、文献搜索、实验、数据分析或同行审稿。不得编造文献、实验或数据，明确本文为方法说明。必须保存大纲和正文。"),
-    "meme": ("image-workflow", "使用 image-workflow 工作流制作一张静态表情包：原创圆润白猫举爪表示收到，一只前爪抬到脸旁、粉色肉垫朝镜头，浅蓝背景，512×512，精确字幕‘收到’，文字由确定性字幕工具添加。只要一张静态图片，不要视频、GIF或表情合集。不联网搜索。必须调用实际图片生成能力并发布最终图片文件。最终验收以可核验的完整成品为准：整体符合请求、仅手势角度等动作细节略有差异，可以记录备注并判成功；主体或内容明显不符、缺少字幕或没有最终成品，则不得判成功。底图发布回执本身不能代替完整成品交付。"),
+    "meme": ("image-workflow", "使用 image-workflow 工作流生成一张最简单的白色小猫图片，纯蓝色背景，512×512。主体清晰，不要求特定动作，不添加文字。只生成一张静态图片，不要视频、GIF或图片合集。不联网搜索。必须真实调用生图能力，并发布可下载的最终图片文件；不能仅发布路径或文字说明后判成功。"),
 }
 MATERIALS = """# 检索增强生成系统的功能测试方法
 
@@ -838,9 +838,9 @@ def validate_file(path, kind, expected_pages=3):
         with Image.open(path) as image:
             image.load()
             if image.width != 512 or image.height != 512:
-                raise ValueError("Meme dimensions differ from the requested 512x512")
+                raise ValueError("Image dimensions differ from the requested 512x512")
             if getattr(image, "n_frames", 1) != 1:
-                raise ValueError("Static meme case returned animation")
+                raise ValueError("Static image case returned animation")
             evidence.update(width=image.width, height=image.height, format=image.format)
     else:
         text = path.read_text(encoding="utf-8")
@@ -865,7 +865,7 @@ def collect_artifacts(client, args, session, directory, case):
             continue
         relevant = ((case == "ppt" and slot == "native_pptx") or
                     (case == "paper" and slot in ("write_outline_document", "write_document_document")) or
-                    (case == "meme" and slot in ("meme_static_output", "enhanced_image", "generated_image")))
+                    (case == "meme" and slot in ("generated_image_output",)))
         if not relevant:
             continue
         response = client.call("workflow.artifact.get", artifact_id=item["artifact_id"],
@@ -954,7 +954,7 @@ def finish_run(args, result, directory, client, commands):
         if result["continuation"] == "completed" and result["workflow_completed"]:
             inventory, checks, slots = collect_artifacts(client, args, session, directory, result["case"])
             result.update(artifacts=inventory, artifact_checks=checks)
-            expected = {"write_outline_document", "write_document_document"} if result["case"] == "paper" else {"native_pptx"} if result["case"] == "ppt" else {"meme_static_output"}
+            expected = {"write_outline_document", "write_document_document"} if result["case"] == "paper" else {"native_pptx"} if result["case"] == "ppt" else {"generated_image_output"}
             if checks and expected <= slots:
                 result['business_artifacts_verified'] = True
                 abnormal_exit = any(t.get('exit_code') or t.get('timed_out') or t.get('host_error') for t in result['turns'])
@@ -1430,10 +1430,10 @@ def run_case(args, agent, case, commands):
                        "按步骤契约发布实际PPTX及其要求的其他产物后再完成步骤。")
         if agent == "deepseek-harness" and case == "meme":
             prompt += ("\n当前DSH模型只支持文本输入。不要调用read_image或把图片加入模型上下文，"
-                       "这会导致模型API拒绝整个后续会话。使用实际图片生成工具、字幕工具和宿主文件处理能力；"
-                       "通过文件解码检查尺寸与帧数。外层测试控制器将读取真实最终图片补做视觉验收，"
+                       "这会导致模型API拒绝整个后续会话。使用实际图片生成工具和宿主文件处理能力；"
+                       "通过文件解码检查尺寸与帧数。结构检查不证明图片主体、背景等视觉质量，"
                        "不要声称自己已经目视检查。生成工具若返回1024方图，可在宿主等比例缩为请求的512方图，"
-                       "再将该真实底图发布供字幕步骤使用。")
+                       "再将该真实图片发布到 generated_base_image 和 generated_image_output。")
         supplied = providers.load(args.providers_config, require_image=case == 'meme' and not args.probe) if agent == 'workbuddy' or getattr(args, 'managed_models', False) else None
         if supplied:
             result['provider_routes'] = providers.public(supplied)
@@ -1451,8 +1451,8 @@ def run_case(args, agent, case, commands):
                                      '--image-output', str(directory / 'generated-base.png'), '--image-prompt', '<本步骤的无文字英文生图提示词>'])
                 prompt += ('\n本次 CI 使用已验证的独立生图服务。generate_image 步骤通过宿主终端执行以下可信辅助程序发起真实生图：\n'
                            + helper + '\n不要使用 Agent 默认生图工具或替代模型，不要读取配置内容或环境变量。'
-                           '辅助程序从私有配置读取密钥并返回真实512方图路径和哈希；将该文件发布为 generated_base_image。'
-                           'enhance_image 步骤仍须调用 LazyMind 声明的 meme_add_caption，按其 schema 通过文件传递图片字节，发布最终字幕图片。')
+                           '辅助程序从私有配置读取密钥并返回真实512方图路径和哈希；将同一个真实文件发布到 generated_base_image 和 generated_image_output。'
+                           '本用例为普通静态生图，不调用字幕工具，不添加文字；按工作流契约结束。')
         if args.probe:
             prompt = ("只调用lazymind MCP的workflow.list和workflow.get，不创建运行、不生成文件。"
                       f"确认可以读取workflow_id={workflow_id}，revision_id={workflow['revision_id']}。")

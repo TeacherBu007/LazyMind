@@ -8,7 +8,7 @@
 
 ## 首次运行：请配置自己的模型和密钥
 
-> **拉取代码后不会获得其他人的 Key 或本机登录。** WorkBuddy 自定义模型模式需要自己的 LLM API Key，静态表情用例还需要生图 API Key。实际密钥保存在仓库外，GitHub CI 使用 Secrets。不要把填过密钥的配置、`.env`、登录凭证或整个测试输出目录提交到 Git。
+> **拉取代码后不会获得其他人的 Key 或本机登录。** WorkBuddy 自定义模型模式需要自己的 LLM API Key，普通生图用例还需要生图 API Key。实际密钥保存在仓库外，GitHub CI 使用 Secrets。不要把填过密钥的配置、`.env`、登录凭证或整个测试输出目录提交到 Git。
 
 无密钥模板是 [`agent_e2e.providers.example.json`](agent_e2e.providers.example.json)。在仓库根目录执行以下命令；已有私有配置会保留：
 
@@ -39,7 +39,7 @@ uv run scripts/agent_e2e.py run --agent workbuddy --case meme --probe --timeout 
 
 `config-check` 只检查字段、地址和文件权限，不调用模型、不显示密钥；它通过后仍需要真实探测和业务测试。缺少配置或字段时，脚本会提示模板位置和补充方法。通过 `--providers-config /仓库外/路径/providers.json` 可更换配置。
 
-只跑 WorkBuddy PPT 或论文时可将生图 Key 留空，并使用 `config-check --case ppt` 或 `config-check --case paper`；静态表情和完整矩阵使用 `config-check --case meme` 或默认命令，必须配置生图 Key。
+只跑 WorkBuddy PPT 或论文时可将生图 Key 留空，并使用 `config-check --case ppt` 或 `config-check --case paper`；普通生图和完整矩阵使用 `config-check --case meme` 或默认命令，必须配置生图 Key。
 
 此配置用于 CI 的 WorkBuddy 自定义模型和生图调用；Codex、DSH 仍使用各自已有的模型配置与认证。三者都需要当前 runner 自己的 LazyMind 登录。
 
@@ -111,7 +111,7 @@ gh run list --repo "$LAZYMIND_CI_REPO" --workflow agent-e2e.yml
 - 凭证位于对应 `--home` 下的正常 `credentials.json`，本机身份位于 `connector-host-id`。
 - Codex 已登录；WorkBuddy 已安装且其 CLI 能正常使用账号；DSH 已有可用模型配置。
 - 三个工作流已发布：`ppt-workflow`、`paper-writing`、`image-workflow`。
-- 静态表情需使用包含 `meme_add_caption` 外部声明和受审适配器的新服务及工作流包。更新测试脚本不会更新已安装的桌面应用；旧安装包请按 [Desktop 构建说明](../desktop/README.md)部署对应源码版本，再启动并确认工作流 revision。
+- `--case meme` 保留旧参数名，现测试白色小猫、纯蓝背景、无指定动作和字幕的普通静态图片；不要求字幕适配器。更新测试脚本不会更新已安装应用，运行前应确认实际工作流 revision。
 
 脚本为每个用例生成独立 MCP 配置，保留原有桌面配置。测试来源、MCP 调用记录、工作流 revision、运行 ID 和宿主会话 ID 分别记录。
 
@@ -162,7 +162,7 @@ Codex 忽略日常 MCP 配置；WorkBuddy 使用内置正式启动入口、强�
 
 ### WorkBuddy 独立 CLI 的认证与自定义模型
 
-优先按上方模板配置自己的模型服务。CI 在仓库外生成临时 WorkBuddy profile，模型配置只引用环境变量；真实供应商 Key 由本机代理持有，WorkBuddy 只收到本次有效的回环地址和临时令牌。LLM 请求固定到配置的模型；静态表情通过同一代理调用配置的生图服务，再由 LazyMind 字幕工具处理并发布。日常 WorkBuddy 配置保持原样。
+优先按上方模板配置自己的模型服务。CI 在仓库外生成临时 WorkBuddy profile，模型配置只引用环境变量；真实供应商 Key 由本机代理持有，WorkBuddy 只收到本次有效的回环地址和临时令牌。LLM 请求固定到配置的模型；普通生图通过同一代理调用配置的生图服务，并发布最终图片。日常 WorkBuddy 配置保持原样。
 
 以下平台认证方式仅用于未提供私有模型配置的场景：
 
@@ -196,11 +196,11 @@ uv run scripts/agent_e2e.py run --agent workbuddy --case meme --probe --timeout 
 
 连接探测必须由真实 Agent 成功调用 `workflow.list` 和 `workflow.get`，且不发生写操作。真实业务通过要求工作流确认完成，并存在已发布的必需产物且文件检查通过。进程退出 0、Agent 自报完成、仅生成本地文件均不算业务通过。
 
-PPT 检查 PPTX 结构、页数和主题；论文检查已发布大纲与正文、篇幅和章节；静态表情检查文件解码、尺寸和帧数。文件结构检查不证明视觉、字幕或科学质量，报告会单独声明未验证项。
+PPT 检查 PPTX 结构、页数和主题；论文检查已发布大纲与正文、篇幅和章节；普通生图检查文件解码、尺寸和帧数。文件结构检查不证明视觉、字幕或科学质量，报告会单独声明未验证项。
 
-图片产物通过 `workflow.artifact.get result_directory` 取回完整发布值，校验交接文件和图片字节的哈希；MCP 的图片预览不作为下载成功证据。静态字幕测试需要包含 `meme_add_caption` 外部工具声明及受审适配的新工作流版本，旧运行仍绑定原版本。
+图片产物通过 `workflow.artifact.get result_directory` 取回完整发布值，校验交接文件和图片字节的哈希；MCP 的图片预览不作为下载成功证据。普通生图验收要求发布 `generated_image_output`，不接受仅有底图回执。旧运行仍绑定原版本。
 
-DSH 当前测试模型仅支持文本输入，表情用例明确禁止 `read_image` 向模型发送图片；使用真实生成、字幕工具和文件解码检查，另由外层控制器读取最终实图完成视觉验收，不把结构检查当成目视检查。
+DSH 当前测试模型仅支持文本输入，图片用例明确禁止 `read_image` 向模型发送图片；使用真实生图和文件解码检查；控制器不提供自动视觉验收，须人工检查归档图片，不把结构检查当成目视检查。
 
 失败和阻塞返回非零退出码。JUnit 中阻塞列为 skipped，但汇总命令仍失败，避免缺账号、缺模型或待审核被误报为通过。
 

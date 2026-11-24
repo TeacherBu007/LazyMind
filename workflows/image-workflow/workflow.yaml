@@ -81,8 +81,6 @@ runtime:
         tools:
         - name: image_editor
           source: global
-        - name: meme_add_caption
-          source: package
   clarification_fields:
     - id: image_goal
       label: 图片主体或修改要求
@@ -115,13 +113,11 @@ tool_scripts:
       - image_search_and_validate
       - image_search_tool
       - validate_image_ref
+      - meme_add_caption
       - select_image_material_route
       - select_image_route
       - select_image_postprocess_route
       - check_image_workflow_capabilities
-  - path: scripts/external_image_tools.py
-    functions:
-      - meme_add_caption
 
 steps:
   - id: analyze_subject

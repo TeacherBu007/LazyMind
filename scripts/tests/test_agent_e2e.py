@@ -417,9 +417,9 @@ class RunnerBoundaryTests(unittest.TestCase):
             class Client:
                 def call(self, name, **kwargs):
                     if name == "workflow.artifact.list":
-                        return {"artifacts": [{"artifact_id": "published", "slot": "meme_static_output", "selected": True}]}
+                        return {"artifacts": [{"artifact_id": "published", "slot": "generated_image_output", "selected": True}]}
                     response = {"artifact": {"artifact_id": "published", "value": {
-                        "filename": "captioned.png", "content_base64": base64.b64encode(raw_image).decode(),
+                        "filename": "generated.png", "content_base64": base64.b64encode(raw_image).decode(),
                         "sha256": hashlib.sha256(raw_image).hexdigest()}}}
                     path = Path(kwargs["result_directory"]) / "response.json"
                     path.write_text(json.dumps(response))
@@ -427,8 +427,20 @@ class RunnerBoundaryTests(unittest.TestCase):
                                               "sha256": hashlib.sha256(path.read_bytes()).hexdigest()},
                             "artifact": {}}
             _, checks, slots = runner.collect_artifacts(Client(), None, "session", directory, "meme")
-            self.assertEqual(slots, {"meme_static_output"})
+            self.assertEqual(slots, {"generated_image_output"})
             self.assertEqual(checks[0]["sha256"], hashlib.sha256(raw_image).hexdigest())
+
+    def test_image_base_or_caption_output_is_not_a_final_plain_image(self):
+        class Client:
+            def call(self, name, **kwargs):
+                if name != "workflow.artifact.list":
+                    raise AssertionError("A non-final image must not be downloaded as a deliverable")
+                return {"artifacts": [{"artifact_id": slot, "slot": slot}
+                                      for slot in ("generated_base_image", "meme_static_output")]}
+        with tempfile.TemporaryDirectory() as tmp:
+            _, checks, slots = runner.collect_artifacts(Client(), None, "session", Path(tmp), "meme")
+            self.assertEqual(checks, [])
+            self.assertEqual(slots, set())
 
     def test_artifact_handoff_cannot_escape_the_output_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -436,7 +448,7 @@ class RunnerBoundaryTests(unittest.TestCase):
             class Client:
                 def call(self, name, **kwargs):
                     if name == "workflow.artifact.list":
-                        return {"artifacts": [{"artifact_id": "published", "slot": "meme_static_output"}]}
+                        return {"artifacts": [{"artifact_id": "published", "slot": "generated_image_output"}]}
                     return {"artifact_file": {"result_path": str(directory / "outside.json"), "sha256": ""}}
             with self.assertRaises(ValueError):
                 runner.collect_artifacts(Client(), None, "session", directory, "meme")

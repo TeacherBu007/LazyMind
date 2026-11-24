@@ -1,6 +1,27 @@
 name: LazyMind Agent E2E (GitHub-hosted)
 
 on:
+  workflow_call:
+    inputs:
+      git_ref:
+        description: Immutable main snapshot selected by the scheduler
+        required: true
+        type: string
+      agent:
+        type: string
+        default: all
+      case:
+        type: string
+        default: all
+      platform:
+        type: string
+        default: all
+      probe_only:
+        type: boolean
+        default: false
+      approve_test_reviews:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       agent:
@@ -23,12 +44,16 @@ on:
         type: boolean
         default: false
       approve_test_reviews:
-        description: Approve only this run's fixed paper and meme test fixtures
+        description: Approve only this run's fixed paper and image test fixtures
         type: boolean
         default: false
 
 permissions:
   contents: read
+
+concurrency:
+  group: agent-e2e-hosted-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   e2e:
@@ -46,6 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.git_ref || github.sha }}
           persist-credentials: false
           submodules: false
       - uses: actions/setup-python@v5
@@ -128,8 +154,10 @@ jobs:
         shell: bash
         run: |
           if [[ -n "${HOSTED_ROOT:-}" && -d "$HOSTED_ROOT/results" ]]; then
-            python scripts/agent_e2e.py report --output "$HOSTED_ROOT/results"
+            status=0
+            python scripts/agent_e2e.py report --output "$HOSTED_ROOT/results" || status=$?
             cat "$HOSTED_ROOT/results/report.md" >> "$GITHUB_STEP_SUMMARY"
+            exit "$status"
           fi
       - name: Diagnose setup failure
         if: failure()
