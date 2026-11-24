@@ -135,7 +135,7 @@ uv run scripts/agent_e2e.py run --agent codex --case ppt
 
 # 明确授权测试用户确认本次新建运行的固定测试材料。
 # 只确认收到的 review_id、version、manifest_hash；不回答未知问题。
-uv run scripts/agent_e2e.py run --agent all --case all --approve-test-reviews --timeout 1800
+uv run scripts/agent_e2e.py run --agent all --case all --approve-test-reviews --timeout 2700
 
 # 只在原测试监督进程已经结束后接续；保留原运行和宿主会话。
 uv run scripts/agent_e2e.py resume --result outputs/agent-e2e/<本次用例目录>/result.json --approve-test-reviews
@@ -146,7 +146,7 @@ uv run scripts/agent_e2e.py report
 
 `--cli`、`--home`、`--server`、`--output`、`--dsh-profile` 可覆盖默认值。为避免凭证误传，本地版仅接受回环地址。`--timeout` 为每个用例的执行预算；`--max-turns` 限制接续次数。宿主接续复用真实会话 ID，终态业务失败不会自动重试。
 
-WorkBuddy PPT 本轮接近 20 分钟，建议使用 `--timeout 1800` 留出宿主收尾时间。手动 CI 默认每用例 30 分钟，整项 job 上限 5 小时；业务完成与 CLI 是否超时需要分别查看。
+macOS self-hosted CI 每个业务用例最多 45 分钟。全量运行的 Job 上限为 8 小时，其余运行上限为 5 小时。业务完成与 CLI 是否超时需要分别查看。
 
 构建后默认优先使用测试输出目录下的专用 CLI。PPT 允许 Agent 使用本机已安装的确定性导出器和 Chromium；这属于宿主导出能力，不会将服务端导出失败改成通过。只有实际文件已发布并校验后才通过。不会自动安装渲染依赖或把 HTML 当作 PPTX 交付。
 

@@ -33,7 +33,8 @@ concurrency:
 jobs:
   agent-e2e:
     runs-on: [self-hosted, macOS, lazymind-ci]
-    timeout-minutes: 300
+    # Nine full cases can consume 405 minutes before setup and reporting.
+    timeout-minutes: ${{ inputs.agent == 'all' && inputs.case == 'all' && !inputs.probe_only && 480 || 300 }}
     env:
       TEST_AGENT: ${{ inputs.agent }}
       TEST_CASE: ${{ inputs.case }}
@@ -108,7 +109,7 @@ jobs:
         run: |
           set -euo pipefail
           options=(run --agent "$TEST_AGENT" --case "$TEST_CASE"
-            --timeout 1800
+            --timeout 2700
             --providers-config "$LAZYMIND_CI_PROVIDERS_CONFIG"
             --private-profile-root "$TEST_ROOT/private-profiles"
             --output "$TEST_ROOT/results")

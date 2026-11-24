@@ -59,7 +59,10 @@ jobs:
   e2e:
     strategy:
       fail-fast: false
+      max-parallel: ${{ inputs.platform == 'all' && 2 || 1 }}
       matrix:
+        # Nine 45-minute cases exceed the six-hour hosted job limit.
+        agent: ${{ fromJSON(inputs.agent == 'all' && inputs.case == 'all' && !inputs.probe_only && '["codex","workbuddy","deepseek-harness"]' || format('["{0}"]', inputs.agent)) }}
         os: ${{ fromJSON(inputs.platform == 'all' && '["macos-15-intel","windows-2025"]' || format('["{0}"]', inputs.platform)) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
@@ -128,7 +131,7 @@ jobs:
       - name: Run sequential cases with independent results and isolated model routes
         shell: bash
         env:
-          TEST_AGENT: ${{ inputs.agent }}
+          TEST_AGENT: ${{ matrix.agent }}
           TEST_CASE: ${{ inputs.case }}
           PROBE_ONLY: ${{ inputs.probe_only }}
           APPROVE_TEST_REVIEWS: ${{ inputs.approve_test_reviews }}
@@ -142,7 +145,7 @@ jobs:
           LAZYMIND_CI_IMAGE_API: ${{ vars.LAZYMIND_CI_IMAGE_API }}
         run: |
           set -euo pipefail
-          options=(run --agent "$TEST_AGENT" --case "$TEST_CASE" --timeout 1800
+          options=(run --agent "$TEST_AGENT" --case "$TEST_CASE" --timeout 2700
             --home "$LAZYMIND_HOME" --server "$LAZYMIND_SERVER_URL"
             --output "$HOSTED_ROOT/results" --private-profile-root "$HOSTED_ROOT/profiles"
             --providers-config scripts/agent_e2e.providers.example.json --managed-models)
@@ -169,7 +172,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: hosted-agent-e2e-${{ matrix.os }}-${{ github.run_id }}
+          name: hosted-agent-e2e-${{ matrix.os }}-${{ matrix.agent != inputs.agent && format('{0}-', matrix.agent) || '' }}${{ github.run_id }}
           if-no-files-found: warn
           retention-days: 7
           path: |

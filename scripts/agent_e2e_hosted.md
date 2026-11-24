@@ -17,12 +17,12 @@
 
 在 Actions 选择上述工作流并点击 **Run workflow**：
 
-- `agent=all`、`case=all`、`platform=all`：每个平台顺序执行 3 Agent × 3 场景，共 18 个业务检查。
+- `agent=all`、`case=all`、`platform=all`：共 18 个业务检查。全量运行按平台和 Agent 拆成 Job，各 Job 顺序执行 3 个场景，最多同时运行 2 个 Job，报告按平台和 Agent 归档。
 - `probe_only=true`：只验证真实 Agent 的 MCP `workflow.list/get`，不生成业务产物。
 - `approve_test_reviews=true`：明确允许测试控制器自动确认本次固定材料的论文大纲和图片方案；不会审批其他用户任务。不允许自动确认时，审核节点会停止，测试报告会如实记录。
 - 单个业务场景失败后会记录失败并继续其他场景；两个平台的矩阵使用 `fail-fast: false`。环境未能启动等公共前置条件失败时，该平台无法开始业务测试，另一平台继续。
 
-每个场景默认最多 30 分钟，每个平台 Job 最多 6 小时。实际运行会消耗 GitHub Actions 配额以及外部模型的用量；不使用付费的大型 Runner。
+每个业务用例最多 45 分钟，每个托管 Job 最多 6 小时。实际运行会消耗 GitHub Actions 配额以及外部模型的用量；不使用付费的大型 Runner。
 
 ## 安装与隔离
 
@@ -56,7 +56,7 @@
 
 独立入口 `.github/workflows/agent-e2e-scheduled.yml` 每周二、周四北京时间 22:00（UTC `0 14 * * 2,4`）运行；GitHub 排队可能延迟。工作流必须存在于仓库默认分支。配置上面的模型 Secrets 后，将仓库 Actions Variable `LAZYMIND_AGENT_E2E_SCHEDULE_ENABLED` 设置为 `true` 启用；不设置时不会创建 tag 或调用模型，方便 fork 和上游独立决定启用时间。手动运行这个入口也受同一开关约束。
 
-调度入口读取 main 最新提交，创建 `ci-日期-时间-run_id-attempt` 轻量 tag，再以相同的不可变 SHA 调用 hosted E2E。每个平台顺序执行三个 Agent 的 PPT、论文、普通生图场景，共 18 项。固定测试的审核由测试控制器处理，失败不会自动重试生图。整个过程从源码构建、启动服务，不生成安装包、不创建 Release。
+调度入口读取 main 最新提交，创建 `ci-日期-时间-run_id-attempt` 轻量 tag，再以相同的不可变 SHA 调用 hosted E2E。每个平台按 Agent 分组执行 PPT、论文、普通生图场景，共 18 项。固定测试的审核由测试控制器处理，失败不会自动重试生图。整个过程从源码构建、启动服务，不生成安装包、不创建 Release。
 
 创建 tag 的 job 只使用仓库 GITHUB_TOKEN；测试 job 只有 contents:read。`ci-*` 不匹配现有 `v*` 发布规则，且 GITHUB_TOKEN 的 push 不触发其他工作流；后续 E2E 使用 workflow_call 显式调用，不依赖 tag push。并发组和产物名称独立，不取消其他 CI。原 ci.yml、安装包、Docker 和发布工作流保持不变。
 
