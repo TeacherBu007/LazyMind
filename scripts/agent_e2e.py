@@ -41,7 +41,7 @@ AGENTS = ("codex", "workbuddy", "deepseek-harness")
 CASES = {
     "ppt": ("ppt-workflow", "使用 PPT 工作流，根据本目录 materials.md 制作3页中文演示文稿。主题为检索增强生成测试，受众为软件测试工程师，科研风格、白底黑字，禁用AI背景图，不联网、不使用模板。最终输出选择原生 PPTX（presentation_output_format=native_pptx），不选择 HTML 工作流分支。必须交付可下载的PPTX，包含目标、方法和结论，不得把HTML预览当成PPTX交付。"),
     "paper": ("paper-writing", "使用论文写作工作流，仅根据本目录 materials.md 写一篇约800字的中文短论文，主题为检索增强生成系统的功能测试方法。输入是研究材料，先生成论文大纲，经测试用户确认后生成正文并结束。无需选题、文献搜索、实验、数据分析或同行审稿。不得编造文献、实验或数据，明确本文为方法说明。必须保存大纲和正文。"),
-    "meme": ("image-workflow", "使用 image-workflow 工作流生成一张最简单的白色小猫图片，纯蓝色背景，512×512。主体清晰，不要求特定动作，不添加文字。只生成一张静态图片，不要视频、GIF或图片合集。不联网搜索。必须真实调用生图能力，并发布可下载的最终图片文件；不能仅发布路径或文字说明后判成功。"),
+    "meme": ("image-workflow", "使用 image-workflow 工作流生成一张最简单的白色小猫图片，纯蓝色背景，512×512。主体清晰，不要求特定动作，不添加字幕或其他文字。验收时，生图服务自动附带的 AI 生成类水印不计为文字。只生成一张静态图片，不要视频、GIF或图片合集。不联网搜索。必须真实调用生图能力，并发布可下载的最终图片文件；不能仅发布路径或文字说明后判成功。"),
 }
 MATERIALS = """# 检索增强生成系统的功能测试方法
 
@@ -1478,7 +1478,7 @@ def run_case(args, agent, case, commands):
                 prompt += ('\n本次 CI 使用已验证的独立生图服务。generate_image 步骤通过宿主终端执行以下可信辅助程序发起真实生图：\n'
                            + helper + '\n不要使用 Agent 默认生图工具或替代模型，不要读取配置内容或环境变量。'
                            '辅助程序从私有配置读取密钥并返回真实512方图路径和哈希；将同一个真实文件发布到 generated_base_image 和 generated_image_output。'
-                           '本用例为普通静态生图，不调用字幕工具，不添加文字；按工作流契约结束。')
+                           '本用例为普通静态生图，不调用字幕工具，不添加文字。验收时仅豁免生图服务自动附带的 AI 生成类水印。按工作流契约结束。')
         if args.probe:
             prompt = ("只调用lazymind MCP的workflow.list和workflow.get，不创建运行、不生成文件。"
                       f"确认可以读取workflow_id={workflow_id}，revision_id={workflow['revision_id']}。")
