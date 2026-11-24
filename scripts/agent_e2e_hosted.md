@@ -32,7 +32,7 @@
 - Python 的 CI 兼容约束见 `scripts/ci-agent-tools/python-constraints.txt`。UMAP / Numba / llvmlite 使用同时提供 Python 3.11 双平台预编译包的版本，避免无人值守环境临时编译 LLVM；不修改本机私有兼容配置。
 - 前端构建沿用项目 macOS 安装包工作流的 4 GiB Node 堆内存设置，避免 Vite 构建超出默认堆限制。
 - Windows 在启动服务前预编译 Core，避免两核虚拟机的首次 Go 编译超过 Chat 等待 Core 的五分钟窗口。连接器宿主标识通过正常 Go CLI 初始化；账号仍通过正常认证取得。
-- Codex 0.151.0、DeepSeek Harness 0.2.1-rc.2，通过 `scripts/ci-agent-tools/package-lock.json` 安装。WorkBuddy 5.11.4.44121853 来自官方更新服务，安装前核对固定 SHA-256。使用的是 WorkBuddy 自带的 CLI。
+- Codex 0.151.0、DeepSeek Harness 0.2.1-rc.2，使用 `scripts/ci-agent-tools/` 下各自的锁文件安装。每个 Job 只安装所选 Agent，单个 Job 运行 `all` 时安装三个。WorkBuddy 5.11.4.44121853 来自官方更新服务，安装前核对固定 SHA-256。使用的是 WorkBuddy 自带的 CLI。
 - PPT 导出依赖使用工作流自带锁文件安装，并安装、实际启动 Chromium。
 - PPT 用例固定选择原生输出：`workflow.start` 显式传入 `clarification_values.presentation_output_format=native_pptx`，分析阶段保持该值。控制器将这个固定用例已确认的输出选择绑定到实际 MCP 启动请求；Agent 遗漏该字段或误选 HTML 时也以 `native_pptx` 启动，保留其他启动答案、固定 revision 和幂等键，并在调用摘要记录实际绑定的输出格式。该绑定只作用于本套 CI 的 PPT 用例，不改变产品中用户选择 HTML 的行为。宿主导出使用的 HTML 仅为内部中间文件，不发布为工作流 HTML 预览；最终向 `native_pptx` 发布真实 PPTX。
 - 托管模型的 PPT 用例通过测试控制器提供的原生导出服务运行可信导出程序，避免 Codex 的 macOS 沙箱限制 Chromium 的系统通信。服务只监听本机、要求本轮短期令牌，只接受本测试的固定三页 deck；离线渲染、禁用字体嵌入、不接受任意命令或外部文件。Agent 仍须生成内容、发布真实 PPTX 并完成 LazyMind 工作流。

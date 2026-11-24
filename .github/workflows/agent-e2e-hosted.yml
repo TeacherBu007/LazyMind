@@ -108,6 +108,7 @@ jobs:
       PYTHONIOENCODING: utf-8
       UV_CONSTRAINT: ${{ github.workspace }}/scripts/ci-agent-tools/python-constraints.txt
       NODE_OPTIONS: --max-old-space-size=4096
+      TEST_AGENT: ${{ matrix.agent }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -152,8 +153,9 @@ jobs:
         run: python scripts/agent_e2e.py config-check --providers-config scripts/agent_e2e.providers.example.json --case "$TEST_CASE"
       - name: Start a fresh source-built LazyMind and authenticate normally
         run: python scripts/agent_e2e_hosted.py start
-      - name: Install all three genuine pinned Agent CLIs
-        run: python scripts/agent_e2e_hosted.py install-agents
+      - name: Install selected pinned Agent CLIs
+        shell: bash
+        run: python scripts/agent_e2e_hosted.py install-agents --agent "$TEST_AGENT"
       - name: Prepare PPT exporter and Chromium
         if: ${{ !inputs.probe_only && (inputs.case == 'ppt' || (inputs.case || 'all') == 'all') }}
         shell: bash
@@ -168,7 +170,6 @@ jobs:
       - name: Run sequential cases with independent results and isolated model routes
         shell: bash
         env:
-          TEST_AGENT: ${{ matrix.agent }}
           TEST_CASE: ${{ inputs.case || 'all' }}
           PROBE_ONLY: ${{ inputs.probe_only || false }}
           APPROVE_TEST_REVIEWS: ${{ github.event_name == 'schedule' || inputs.approve_test_reviews }}
